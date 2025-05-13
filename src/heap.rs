@@ -17,7 +17,7 @@ pub struct Heap {
   data : [u8; MAX_HEAP_MEM]
 }
 
-type HeapAddr = i32;
+pub type HeapAddr = i32;
 
 impl Heap {
   fn write_u8(&mut self, to_write: u8) {
@@ -118,7 +118,7 @@ impl Heap {
     let mut res: Vec<i32> = Vec::<HeapAddr>::with_capacity(len);
     let mut next_elem_addr = addr + 5;
     let last = addr + (len+2)*4;
-    while (next_elem_addr < last) {
+    while next_elem_addr < last {
       res.push(i32::from_le_bytes([self.data[next_elem_addr + 1], self.data[next_elem_addr + 2], self.data[next_elem_addr + 3], self.data[next_elem_addr + 4]]));
       next_elem_addr += 4;
     };
