@@ -132,6 +132,17 @@ impl Heap {
     content_addr
   }
 
+  /// Set the reference cell contents at *ref_addr* equal to *val_addr*
+  pub fn assign_ref(&mut self, ref_addr: HeapAddr, val_addr: HeapAddr) {
+    let ref_addr = usize::try_from(ref_addr).unwrap();
+    assert!(self.data[ref_addr] == TAG_REF);
+    let bytes = val_addr.to_le_bytes();
+    self.data[ref_addr + 1] = bytes[0];
+    self.data[ref_addr + 2] = bytes[1];
+    self.data[ref_addr + 3] = bytes[2];
+    self.data[ref_addr + 4] = bytes[3];
+  }
+
   pub fn expect_basic(&mut self, addr: HeapAddr) -> i32 {
     let addr = usize::try_from(addr).unwrap();
     assert!(self.data[addr] == TAG_BASIC);

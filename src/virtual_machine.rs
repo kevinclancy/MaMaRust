@@ -206,12 +206,16 @@ impl VirtualMachine {
               self.pc = self.pc + 1;
             },
             0x0F => { // MkRef
+              println!("MkRef");
               self.s[self.sp] = self.heap.new_ref(self.s[self.sp]);
               self.pc += 1;
             },
             0x10 => { // RefAssign
-              let _ = self.heap.expect_ref(self.s[self.sp]);
-              // TODO TODO TODO !!! heap.new_ref()
+              println!("RefAssign");
+              self.heap.assign_ref(self.s[self.sp], self.s[self.sp - 1]);
+              self.s[self.sp-1] = self.s[self.sp];
+              self.sp -= 1;
+              self.pc += 1;
             },
             0x11 => { // GetBasic
               println!("GetBasic");
