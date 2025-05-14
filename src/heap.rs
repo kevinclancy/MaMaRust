@@ -105,7 +105,7 @@ impl Heap {
     assert!(self.data[addr] == TAG_FUNCTION);
     let code_addr = i32::from_le_bytes([self.data[addr + 1], self.data[addr + 2], self.data[addr + 3], self.data[addr + 4]]);
     let args_addr = i32::from_le_bytes([self.data[addr + 5], self.data[addr + 6], self.data[addr + 7], self.data[addr + 8]]);
-    let globals_addr = i32::from_le_bytes([self.data[addr + 6], self.data[addr + 7], self.data[addr + 8], self.data[addr + 9]]);
+    let globals_addr = i32::from_le_bytes([self.data[addr + 9], self.data[addr + 10], self.data[addr + 11], self.data[addr + 12]]);
     (code_addr, args_addr, globals_addr)
   }
 
@@ -119,7 +119,7 @@ impl Heap {
     let mut next_elem_addr = addr + 5;
     let last = addr + 1 + (len+1)*4;
     while next_elem_addr < last {
-      res.push(i32::from_le_bytes([self.data[next_elem_addr + 1], self.data[next_elem_addr + 2], self.data[next_elem_addr + 3], self.data[next_elem_addr + 4]]));
+      res.push(i32::from_le_bytes([self.data[next_elem_addr + 0], self.data[next_elem_addr + 1], self.data[next_elem_addr + 2], self.data[next_elem_addr + 3]]));
       next_elem_addr += 4;
     };
     res
