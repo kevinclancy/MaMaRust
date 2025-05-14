@@ -117,7 +117,7 @@ impl Heap {
       .unwrap();
     let mut res: Vec<i32> = Vec::<HeapAddr>::with_capacity(len);
     let mut next_elem_addr = addr + 5;
-    let last = addr + (len+2)*4;
+    let last = addr + 1 + (len+1)*4;
     while next_elem_addr < last {
       res.push(i32::from_le_bytes([self.data[next_elem_addr + 1], self.data[next_elem_addr + 2], self.data[next_elem_addr + 3], self.data[next_elem_addr + 4]]));
       next_elem_addr += 4;
@@ -135,7 +135,17 @@ impl Heap {
   pub fn expect_basic(&mut self, addr: HeapAddr) -> i32 {
     let addr = usize::try_from(addr).unwrap();
     assert!(self.data[addr] == TAG_BASIC);
-    i32::from_le_bytes([self.data[addr + 1], self.data[addr + 2], self.data[addr + 3], self.data[addr + 4]])
+    let val = i32::from_le_bytes([self.data[addr + 1], self.data[addr + 2], self.data[addr + 3], self.data[addr + 4]]);
+    println!("get_basic {val}");
+    val
+  }
+
+  /// Asserts the existence of tuple at addr. Returns the heap address of the tuple's element vector.
+  pub fn expect_tuple(&mut self, addr: HeapAddr) -> HeapAddr {
+    let addr = usize::try_from(addr).unwrap();
+    assert!(self.data[addr] == TAG_TUPLE);
+    let val = i32::from_le_bytes([self.data[addr + 1], self.data[addr + 2], self.data[addr + 3], self.data[addr + 4]]);
+    val
   }
 
   pub fn new_vector(&mut self, elems: &[i32]) -> HeapAddr {
@@ -148,12 +158,20 @@ impl Heap {
     ret.try_into().unwrap()
   }
 
+  pub fn new_tuple(&mut self, elems_addr: HeapAddr) -> HeapAddr {
+    let ret = self.next_addr;
+    self.write_u8(TAG_TUPLE);
+    self.write_i32(elems_addr);
+    ret.try_into().unwrap()
+  }
+
   pub fn new_function(&mut self, code_addr : CodeAddr, arg_vec : HeapAddr, global_vec : HeapAddr) -> HeapAddr {
     let ret = self.next_addr;
     self.write_u8(TAG_FUNCTION);
     self.write_i32(code_addr);
     self.write_i32(arg_vec);
     self.write_i32(global_vec);
+    println!("new function at {ret}");
     ret.try_into().unwrap()
   }
 
@@ -171,6 +189,8 @@ impl Heap {
     let ret = self.next_addr;
     self.write_u8(TAG_BASIC);
     self.write_i32(n);
+    let b = self.expect_basic(ret.try_into().unwrap());
+    println!("new basic {b} at {ret}");
     ret.try_into().unwrap()
   }
 

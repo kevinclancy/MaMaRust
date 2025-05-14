@@ -63,7 +63,7 @@ impl VirtualMachine {
   }
 
   fn wrap(&mut self) {
-    let fun_addr = self.heap.new_function(self.pc - 1, self.s[self.sp], self.gp);
+    let fun_addr = self.heap.new_function(self.pc, self.s[self.sp], self.gp);
     self.s[self.sp] = fun_addr;
   }
 
@@ -116,6 +116,7 @@ impl VirtualMachine {
   fn pushloc(&mut self, n: i32) {
     let n : usize = n.try_into().unwrap();
     self.s[self.sp + 1] = self.s[self.sp - n];
+    self.sp += 1;
   }
 
   pub fn execute(&mut self) -> i32 {
@@ -125,46 +126,55 @@ impl VirtualMachine {
         match instr & 0x000000FF {
             0x00 => break, // halt
             0x01 => { // mul
+              println!("mul");
               self.s[self.sp - 1] = self.s[self.sp - 1] * self.s[self.sp];
               self.sp -= 1;
               self.pc += 1;
             },
             0x02 => { // add
+              println!("add");
               self.s[self.sp - 1] = self.s[self.sp - 1] + self.s[self.sp];
               self.sp -= 1;
               self.pc += 1;
             },
             0x03 => { // sub
+              println!("sub");
               self.s[self.sp - 1] = self.s[self.sp - 1] - self.s[self.sp];
               self.sp -= 1;
               self.pc += 1;
             },
             0x04 => { // leq
+              println!("leq");
               self.s[self.sp - 1] = if self.s[self.sp - 1] <= self.s[self.sp] { 1 } else { 0 };
               self.sp -= 1;
               self.pc += 1;
             },
             0x05 => { // eq
+              println!("eq");
               self.s[self.sp - 1] = if self.s[self.sp - 1] == self.s[self.sp] { 1 } else { 0 };
               self.sp -= 1;
               self.pc += 1;
             },
             0x06 => { // geq
+              println!("geq");
               self.s[self.sp - 1] = if self.s[self.sp - 1] >= self.s[self.sp] { 1 } else { 0 };
               self.sp -= 1;
               self.pc += 1;
             },
             0x07 => { // gt
+              println!("gt");
               self.s[self.sp - 1] = if self.s[self.sp - 1] > self.s[self.sp] { 1 } else { 0 };
               self.sp -= 1;
               self.pc += 1;
             },
             0x08 => { // lt
+              println!("lt");
               self.s[self.sp - 1] = if self.s[self.sp - 1] < self.s[self.sp] { 1 } else { 0 };
               self.sp -= 1;
               self.pc += 1;
             },
             0x09 => { // neg
+              println!("neg");
               self.s[self.sp] = -self.s[self.sp];
               self.pc += 1;
             },
@@ -186,6 +196,7 @@ impl VirtualMachine {
               self.pc += 1;
             },
             0x0D => { // Pop
+              println!("pop");
               self.sp -= 1;
               self.pc += 1;
             },
@@ -203,21 +214,25 @@ impl VirtualMachine {
               // TODO TODO TODO !!! heap.new_ref()
             },
             0x11 => { // GetBasic
+              println!("GetBasic");
               let n = self.heap.expect_basic(self.s[self.sp]);
               self.s[self.sp] = n;
               self.pc += 1;
             },
             0x12 => { // MkBasic
+              println!("MkBasic");
               self.s[self.sp] = self.heap.new_basic(self.s[self.sp]);
               self.pc += 1;
             },
             0x13 => { // PushLoc(n)
               let n : i32 = (instr & 0x00FFFF00) >> 8;
+              println!("PushLoc {n}");
               self.pushloc(n);
               self.pc += 1;
             },
             0x14 => { // PushGloba(n)
               let n : usize = ((instr & 0x00FFFF00) >> 8).try_into().unwrap();
+              println!("PushGlobal {n}");
               let globals  = self.heap.expect_vector(self.gp);
               if n < globals.len() {
                 self.s[self.sp + 1] = globals[n];
@@ -229,11 +244,13 @@ impl VirtualMachine {
             },
             0x15 => { // Slide(n)
               let n : i32 = (instr & 0x00FFFF00) >> 8;
+              println!("Slide {}",n);
               self.slide(n);
               self.pc += 1;
             },
             0x16 => { // GetVec
               let elems = self.heap.expect_vector(self.s[self.sp]);
+              println!("GetVec");
               for i in 0..elems.len() {
                 self.s[self.sp + i] = elems[i];
               }
@@ -242,6 +259,7 @@ impl VirtualMachine {
             },
             0x17 => { // MkVec(n)
               let n : usize = ((instr & 0x00FFFF00) >> 8).try_into().unwrap();
+              println!("MkVec {n}");
               let mut vec = vec![0; n.try_into().unwrap()];
               self.sp = self.sp - n + 1;
               for i in (0 as usize)..(n as usize) {
@@ -252,25 +270,30 @@ impl VirtualMachine {
             },
             0x18 => { // MkFunVal(addr)
               let code_addr : i32 = (instr & 0x00FFFF00) >> 8;
+              println!("MkFunVal {code_addr}");
               let args_addr = self.heap.new_vector(&[0;0]);
               self.s[self.sp] = self.heap.new_function(code_addr, args_addr, self.s[self.sp]);
               self.pc += 1;
             },
             0x19 => { // MkClos(addr)
               let code_addr : i32 = (instr & 0x00FFFF00) >> 8;
+              println!("MkClos {code_addr}");
               self.s[self.sp] = self.heap.new_closure(code_addr, self.s[self.sp]);
               self.pc += 1;
             },
             0x1A => { // Mark(return_addr)
               let return_addr : i32 = (instr & 0x00FFFF00) >> 8;
+              println!("Mark {return_addr}");
               self.mark(return_addr);
               self.pc += 1;
             },
             0x1B => { // Apply
+              println!("Apply");
               self.apply ()
             },
             0x1C => { // TArg(numFormals)
               let num_formals : i32 = (instr & 0x0000FF00) >> 8;
+              println!("TArg {num_formals}");
               if self.sp - self.fp < num_formals.try_into().unwrap() {
                 self.mkvec0 ();
                 self.wrap ();
@@ -281,6 +304,7 @@ impl VirtualMachine {
             },
             0x1D => { // Return(numFormals)
               let num_formals : i32 = (instr & 0x0000FF00) >> 8;
+              println!("Return {num_formals}");
               if self.sp - self.fp - 1 == num_formals.try_into().unwrap() {
                 self.popenv ()
               } else {
@@ -290,6 +314,7 @@ impl VirtualMachine {
             },
             0x1E => { // Alloc(num_closures_to_alloc)
               let num_closures_to_alloc : usize = ((instr & 0x0000FF00) >> 8).try_into().unwrap();
+              println!("Return {num_closures_to_alloc}");
               for i in 1..(num_closures_to_alloc + 1) {
                 self.s[self.sp + i] = self.heap.new_closure(-1, -1);
               }
@@ -298,11 +323,13 @@ impl VirtualMachine {
             },
             0x1F => { // Rewrite(n)
               let n : usize = ((instr & 0x0000FF00) >> 8).try_into().unwrap();
+              println!("Rewrite {n}");
               self.heap.rewrite(self.s[self.sp], self.s[self.sp - n]);
               self.sp -= 1;
               self.pc += 1;
             },
             0x20 => { // Eval
+              println!("Eval");
               match self.heap.is_closure(self.s[self.sp]) {
                 true => {
                   self.mark(self.pc + 1);
@@ -315,11 +342,13 @@ impl VirtualMachine {
               }
             },
             0x21 => { // Update
+              println!("Update");
               self.popenv();
               self.rewrite(1);
             },
             0x22 => { // Load(numWords)
               let num_words_to_load : usize = ((instr & 0x0000FF00) >> 8).try_into().unwrap();
+              println!("Load {num_words_to_load}");
               let base_stack_addr : usize = self.s[self.sp].try_into().unwrap();
               for i in 0..num_words_to_load {
                 self.s[self.sp + i] = self.s[base_stack_addr + i];
@@ -329,29 +358,48 @@ impl VirtualMachine {
             },
             0x23 => { // LoadC(constantToLoad)
               let constant_to_load : i32 = (instr & 0x7FFFFF00) >> 8;
+              println!("LoadC {constant_to_load}");
               self.sp += 1;
               self.s[self.sp] = constant_to_load;
               self.pc += 1;
             },
             0x24 => { // Jump(destAddr)
               let dest_addr : i32 = (instr & 0x00FFFF00) >> 8;
+              println!("Jump {dest_addr}");
               self.pc = dest_addr;
             },
             0x25 => { // JumpZ(destAddr)
               let dest_addr : i32 = (instr & 0x00FFFF00) >> 8;
+              println!("JumpZ {dest_addr}");
               self.pc = if self.s[self.sp] == 0 { dest_addr } else { self.pc + 1 };
               self.sp -= 1;
             },
             0x26 => { // JumpNZ(destAddr)
               let dest_addr : i32 = (instr & 0x00FFFF00) >> 8;
+              println!("JumpNZ {dest_addr}");
               let n = self.heap.expect_basic(self.s[self.sp]);
               self.pc = if n != 0 { dest_addr } else { self.pc + 1 };
               self.sp -= 1;
             },
             0x27 => { // JumpI(jump_offset)
               let jump_offset : i32 = (instr & 0x00FFFF00) >> 8;
+              println!("JumpI {jump_offset}");
               self.pc = self.s[self.sp] + jump_offset;
               self.sp -= 1;
+            },
+            0x28 => { //MkTuple
+              let tuple_addr = self.heap.new_tuple(self.s[self.sp]);
+              self.s[self.sp] = tuple_addr;
+              self.pc += 1;
+            },
+            0x29 => { //GetTuple
+              let elems_addr = self.heap.expect_tuple(self.s[self.sp]);
+              let elems = self.heap.expect_vector(elems_addr);
+              for i in 0..elems.len() {
+                self.s[self.sp + i] = elems[i];
+              }
+              self.sp = self.sp + elems.len() - 1;
+              self.pc += 1;
             },
             _ => panic!("invalid instruction")
         }
