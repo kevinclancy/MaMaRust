@@ -62,8 +62,8 @@ impl Heap {
     assert!(self.data[target_addr] == TAG_CLOSURE);
     // we can write differing amounts depending on the type of src, or just write 13 bytes (size of closure)
     // the performance impact should be studied
-    let target : usize = src.try_into().unwrap();
-    let src : usize = target.try_into().unwrap();
+    let target : usize = target.try_into().unwrap();
+    let src : usize = src.try_into().unwrap();
     // closure objects are 13 bytes, so that is how many we copy
     self.data[target] = self.data[src];
     self.data[target + 1] = self.data[src + 1];

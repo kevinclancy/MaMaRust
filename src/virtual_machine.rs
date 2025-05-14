@@ -324,6 +324,7 @@ impl VirtualMachine {
             0x1F => { // Rewrite(n)
               let n : usize = ((instr & 0x0000FF00) >> 8).try_into().unwrap();
               println!("Rewrite {n}");
+              let zzz = self.sp - n;
               self.heap.rewrite(self.s[self.sp], self.s[self.sp - n]);
               self.sp -= 1;
               self.pc += 1;
