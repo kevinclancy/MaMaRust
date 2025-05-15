@@ -178,18 +178,22 @@ impl VirtualMachine {
               self.s[self.sp] = -self.s[self.sp];
               self.pc += 1;
             },
-            0x0A => { // MkSum
+            0x0A => { // MkSum (variant_id)
+              println!("MkSum");
               let variant_id = instr.to_le_bytes()[1];
-              self.heap.new_sum(variant_id, self.s[self.sp]);
+              let sum_addr = self.heap.new_sum(variant_id, self.s[self.sp]);
+              self.s[self.sp] = sum_addr;
               self.pc += 1;
             },
             0x0B => { //TSum
+              println!("TSum");
               let (variant_id, _) = self.heap.expect_sum(self.s[self.sp]);
               let instr_bytes = instr.to_le_bytes();
               let jump_table_addr = u16::from_le_bytes([instr_bytes[1], instr_bytes[2]]);
               self.pc = Into::<i32>::into(jump_table_addr) + Into::<i32>::into(variant_id);
             },
             0x0C => { // TGetConstructorArg
+              println!("TGetConstructorArg");
               let (_, args_vec_addr) = self.heap.expect_sum(self.s[self.sp]);
               self.sp += 1;
               self.s[self.sp] = args_vec_addr;
