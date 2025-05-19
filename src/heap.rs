@@ -166,6 +166,7 @@ impl Heap {
     for &elem in elems {
       self.write_i32(elem);
     }
+    println!("new vector at {ret}");
     ret.try_into().unwrap()
   }
 
@@ -200,8 +201,7 @@ impl Heap {
     let ret = self.next_addr;
     self.write_u8(TAG_BASIC);
     self.write_i32(n);
-    let b = self.expect_basic(ret.try_into().unwrap());
-    println!("new basic {b} at {ret}");
+    println!("new basic at {ret}");
     ret.try_into().unwrap()
   }
 
