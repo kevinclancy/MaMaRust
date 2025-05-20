@@ -6,10 +6,6 @@ pub struct VirtualMachine {
   instructions: Vec<i32>,
   /// Program counter
   pc: CodeAddr,
-  /// Base stack
-  bs: Vec<i32>,
-  /// Base stack pointer
-  bsp: usize,
   /// Stack
   s: Vec<i32>,
   /// Stack pointer
@@ -26,7 +22,6 @@ pub struct VirtualMachine {
 pub type CodeAddr = i32;
 
 const MAX_STACK_MEM : usize = 20000;
-const MAX_BASE_STACK_MEM : usize = 200;
 
 fn to_instructions(bytes: Vec<u8>) -> Vec<i32> {
   let mut result : Vec<i32> = vec![];
@@ -46,10 +41,8 @@ impl VirtualMachine {
   pub fn from_file(file_name : &str) -> VirtualMachine {
     let f = to_instructions(std::fs::read(file_name).unwrap());
     VirtualMachine {
-      bs: Vec::from([0 as i32; MAX_BASE_STACK_MEM/4]),
       s: Vec::from([0 as i32; MAX_STACK_MEM/4]),
       sp: 0,
-      bsp: 0,
       gp: 0,
       fp: 1,
       instructions: f,
@@ -134,55 +127,55 @@ impl VirtualMachine {
             0x00 => break, // halt
             0x01 => { // mul
               println!("mul");
-              self.bs[self.bsp - 1] = self.bs[self.bsp - 1] * self.bs[self.bsp];
-              self.bsp -= 1;
+              self.s[self.sp - 1] = self.s[self.sp - 1] * self.s[self.sp];
+              self.sp -= 1;
               self.pc += 1;
             },
             0x02 => { // add
               println!("add");
-              self.bs[self.bsp - 1] = self.bs[self.bsp - 1] + self.bs[self.bsp];
-              self.bsp -= 1;
+              self.s[self.sp - 1] = self.s[self.sp - 1] + self.s[self.sp];
+              self.sp -= 1;
               self.pc += 1;
             },
             0x03 => { // sub
               println!("sub");
-              self.bs[self.bsp - 1] = self.bs[self.bsp - 1] - self.bs[self.bsp];
-              self.bsp -= 1;
+              self.s[self.sp - 1] = self.s[self.sp - 1] - self.s[self.sp];
+              self.sp -= 1;
               self.pc += 1;
             },
             0x04 => { // leq
               println!("leq");
-              self.bs[self.bsp - 1] = if self.bs[self.bsp - 1] <= self.bs[self.bsp] { 1 } else { 0 };
-              self.bsp -= 1;
+              self.s[self.sp - 1] = if self.s[self.sp - 1] <= self.s[self.sp] { 1 } else { 0 };
+              self.sp -= 1;
               self.pc += 1;
             },
             0x05 => { // eq
               println!("eq");
-              self.bs[self.bsp - 1] = if self.bs[self.bsp - 1] == self.bs[self.bsp] { 1 } else { 0 };
-              self.bsp -= 1;
+              self.s[self.sp - 1] = if self.s[self.sp - 1] == self.s[self.sp] { 1 } else { 0 };
+              self.sp -= 1;
               self.pc += 1;
             },
             0x06 => { // geq
               println!("geq");
-              self.bs[self.bsp - 1] = if self.bs[self.bsp - 1] >= self.bs[self.bsp] { 1 } else { 0 };
-              self.bsp -= 1;
+              self.s[self.sp - 1] = if self.s[self.sp - 1] >= self.s[self.sp] { 1 } else { 0 };
+              self.sp -= 1;
               self.pc += 1;
             },
             0x07 => { // gt
               println!("gt");
-              self.bs[self.bsp - 1] = if self.bs[self.bsp - 1] > self.bs[self.bsp] { 1 } else { 0 };
-              self.bsp -= 1;
+              self.s[self.sp - 1] = if self.s[self.sp - 1] > self.s[self.sp] { 1 } else { 0 };
+              self.sp -= 1;
               self.pc += 1;
             },
             0x08 => { // lt
               println!("lt");
-              self.bs[self.bsp - 1] = if self.bs[self.bsp - 1] < self.bs[self.bsp] { 1 } else { 0 };
-              self.bsp -= 1;
+              self.s[self.sp - 1] = if self.s[self.sp - 1] < self.s[self.sp] { 1 } else { 0 };
+              self.sp -= 1;
               self.pc += 1;
             },
             0x09 => { // neg
               println!("neg");
-              self.bs[self.bsp] = -self.bs[self.bsp];
+              self.s[self.sp] = -self.s[self.sp];
               self.pc += 1;
             },
             0x0A => { // MkSum (variant_id)
@@ -231,16 +224,12 @@ impl VirtualMachine {
             0x11 => { // GetBasic
               println!("GetBasic");
               let n = self.heap.expect_basic(self.s[self.sp]);
-              self.bs[self.bsp + 1] = n;
-              self.sp -= 1;
-              self.bsp += 1;
+              self.s[self.sp] = n;
               self.pc += 1;
             },
             0x12 => { // MkBasic
               println!("MkBasic");
-              self.s[self.sp + 1] = self.heap.new_basic(self.bs[self.bsp]);
-              self.sp += 1;
-              self.bsp -= 1;
+              self.s[self.sp] = self.heap.new_basic(self.s[self.sp]);
               self.pc += 1;
             },
             0x13 => { // PushLoc(n)
@@ -249,7 +238,7 @@ impl VirtualMachine {
               self.pushloc(n);
               self.pc += 1;
             },
-            0x14 => { // PushGlobal(n)
+            0x14 => { // PushGloba(n)
               let n : usize = ((instr & 0x00FFFF00) >> 8).try_into().unwrap();
               println!("PushGlobal {n}");
               let globals  = self.heap.expect_vector(self.gp);
@@ -378,8 +367,8 @@ impl VirtualMachine {
             0x23 => { // LoadC(constantToLoad)
               let constant_to_load : i32 = (instr & 0x7FFFFF00) >> 8;
               println!("LoadC {constant_to_load}");
-              self.bsp += 1;
-              self.bs[self.bsp] = constant_to_load;
+              self.sp += 1;
+              self.s[self.sp] = constant_to_load;
               self.pc += 1;
             },
             0x24 => { // Jump(destAddr)
@@ -390,8 +379,8 @@ impl VirtualMachine {
             0x25 => { // JumpZ(destAddr)
               let dest_addr : i32 = (instr & 0x00FFFF00) >> 8;
               println!("JumpZ {dest_addr}");
-              self.pc = if self.bs[self.bsp] == 0 { dest_addr } else { self.pc + 1 };
-              self.bsp -= 1;
+              self.pc = if self.s[self.sp] == 0 { dest_addr } else { self.pc + 1 };
+              self.sp -= 1;
             },
             0x26 => { // JumpNZ(destAddr)
               let dest_addr : i32 = (instr & 0x00FFFF00) >> 8;
