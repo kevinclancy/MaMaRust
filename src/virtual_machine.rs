@@ -47,7 +47,7 @@ impl VirtualMachine {
     VirtualMachine {
       s: Vec::from([0 as i32; MAX_STACK_MEM/4]),
       sp: 0,
-      ss: Vec::from([0 as i32; MAX_STACK_MEM/4]),
+      ss: Vec::from([0 as u32; MAX_STACK_MEM/4]),
       ssp: 0,
       gp: 0,
       fp: 0,
@@ -60,21 +60,22 @@ impl VirtualMachine {
   fn mkvec0(&mut self) {
     let n = self.ssp - self.fp;
     let mut vec = vec![0; n];
+
     self.ssp = self.fp + 1;
     for i in 0..n {
       vec[i] = self.ss[self.ssp + i]
     };
-    let vec_addr = self.heap.new_vector(&vec[..]);
+    let vec_addr = self.heap.new_vector(&vec[..], &mut self.ss);
     self.ss[self.ssp] = vec_addr;
   }
 
   fn wrap(&mut self) {
-    let fun_addr = self.heap.new_function(self.pc, self.ss[self.ssp], self.gp);
+    let fun_addr = self.heap.new_function(self.pc, self.ss[self.ssp], self.gp, &mut self.ss);
     self.ss[self.ssp] = fun_addr;
   }
 
   fn popenv(&mut self) {
-    self.gp = self.s[self.sp - 2];
+    self.gp = self.s[self.sp - 2].try_into().unwrap();
     self.pc = self.s[self.sp];
     self.ss[self.fp+1] = self.ss[self.ssp];
     self.ssp = self.fp + 1;
@@ -83,7 +84,7 @@ impl VirtualMachine {
   }
 
   fn mark(&mut self, return_addr: CodeAddr) {
-    self.s[self.sp + 1] = self.gp;
+    self.s[self.sp + 1] = self.gp.try_into().unwrap();
     self.s[self.sp + 2] = self.fp.try_into().unwrap();
     self.s[self.sp + 3] = return_addr;
     self.fp = self.ssp;
@@ -116,7 +117,7 @@ impl VirtualMachine {
 
   fn rewrite(&mut self, n: i32) {
     let n : usize = n.try_into().unwrap();
-    self.heap.rewrite(self.s[self.sp - n],self.s[self.sp]);
+    self.heap.rewrite(self.ss[self.ssp - n],self.ss[self.ssp]);
     self.sp -= 1;
   }
 
@@ -188,7 +189,7 @@ impl VirtualMachine {
             0x0A => { // MkSum (variant_id)
               println!("MkSum");
               let variant_id = instr.to_le_bytes()[1];
-              let sum_addr = self.heap.new_sum(variant_id, self.ss[self.ssp]);
+              let sum_addr = self.heap.new_sum(variant_id, self.ss[self.ssp], &mut self.ss);
               self.ss[self.ssp] = sum_addr;
               self.pc += 1;
             },
@@ -218,7 +219,7 @@ impl VirtualMachine {
             },
             0x0F => { // MkRef
               println!("MkRef");
-              self.ss[self.ssp] = self.heap.new_ref(self.ss[self.ssp]);
+              self.ss[self.ssp] = self.heap.new_ref(self.ss[self.ssp], &mut self.ss);
               self.pc += 1;
             },
             0x10 => { // RefAssign
@@ -239,7 +240,7 @@ impl VirtualMachine {
             0x12 => { // MkBasic
               println!("MkBasic");
               self.ssp += 1;
-              self.ss[self.ssp] = self.heap.new_basic(self.s[self.sp]);
+              self.ss[self.ssp] = self.heap.new_basic(self.s[self.sp], &mut self.ss);
               self.sp -= 1;
               self.pc += 1;
             },
@@ -284,20 +285,20 @@ impl VirtualMachine {
               for i in 0..n {
                 vec[i] = self.ss[self.ssp + i];
               };
-              self.ss[self.ssp] = self.heap.new_vector(&vec[..]);
+              self.ss[self.ssp] = self.heap.new_vector(&vec[..], &mut self.ss);
               self.pc += 1;
             },
             0x18 => { // MkFunVal(addr)
               let code_addr : i32 = (instr & 0x00FFFF00) >> 8;
               println!("MkFunVal {code_addr}");
-              let args_addr = self.heap.new_vector(&[0;0]);
-              self.ss[self.ssp] = self.heap.new_function(code_addr, args_addr, self.ss[self.ssp]);
+              let args_addr = self.heap.new_vector(&[0;0], &mut self.ss);
+              self.ss[self.ssp] = self.heap.new_function(code_addr, args_addr, self.ss[self.ssp], &mut self.ss);
               self.pc += 1;
             },
             0x19 => { // MkClos(addr)
               let code_addr : i32 = (instr & 0x00FFFF00) >> 8;
               println!("MkClos {code_addr}");
-              self.ss[self.ssp] = self.heap.new_closure(code_addr, self.ss[self.ssp]);
+              self.ss[self.ssp] = self.heap.new_closure(code_addr, self.ss[self.ssp], &mut self.ss);
               self.pc += 1;
             },
             0x1A => { // Mark(return_addr)
@@ -335,7 +336,7 @@ impl VirtualMachine {
               let num_closures_to_alloc : usize = ((instr & 0x0000FF00) >> 8).try_into().unwrap();
               println!("Return {num_closures_to_alloc}");
               for i in 1..(num_closures_to_alloc + 1) {
-                self.ss[self.ssp + i] = self.heap.new_closure(-1, -1);
+                self.ss[self.ssp + i] = self.heap.new_closure(0, 0, &mut self.ss);
               }
               self.ssp += num_closures_to_alloc;
               self.pc += 1;
@@ -400,7 +401,7 @@ impl VirtualMachine {
               self.sp -= 1;
             },
             0x28 => { //MkTuple
-              let tuple_addr = self.heap.new_tuple(self.ss[self.ssp]);
+              let tuple_addr = self.heap.new_tuple(self.ss[self.ssp], &mut self.ss);
               self.ss[self.ssp] = tuple_addr;
               self.pc += 1;
             },

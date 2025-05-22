@@ -1,23 +1,28 @@
+use std::{mem::swap, slice};
+
 use crate::{virtual_machine::CodeAddr};
 
 const MAX_HEAP_MEM : usize = 10000;
 
-const TAG_BASIC : u8 = 0x00;
-const TAG_CLOSURE : u8 = 0x01;
-const TAG_FUNCTION : u8 = 0x02;
-const TAG_VECTOR : u8 = 0x03;
-const TAG_REF : u8 = 0x04;
-const TAG_SUM : u8 = 0x05;
+const TAG_FORWARDING_PTR : u8 = 0x00;
+const TAG_BASIC : u8 = 0x01;
+const TAG_CLOSURE : u8 = 0x02;
+const TAG_FUNCTION : u8 = 0x03;
+const TAG_VECTOR : u8 = 0x04;
+const TAG_REF : u8 = 0x05;
+const TAG_SUM : u8 = 0x06;
+
 /// NOTE: we don't use vectors to represent tuples because they can't be guaranteed to take
 /// less memory than a closure, which makes rewrite impossible
-const TAG_TUPLE : u8 = 0x06;
+const TAG_TUPLE : u8 = 0x07;
 
 pub struct Heap {
   next_addr : usize,
-  data : [u8; MAX_HEAP_MEM]
+  data : Vec<u8>,
+  copy : Vec<u8>
 }
 
-pub type HeapAddr = i32;
+pub type HeapAddr = u32;
 
 impl Heap {
   fn write_u8(&mut self, to_write: u8) {
@@ -52,7 +57,203 @@ impl Heap {
   pub fn create() -> Heap {
     Heap {
       next_addr: 0,
-      data: [0; MAX_HEAP_MEM]
+      data: Vec::from([0; MAX_HEAP_MEM]),
+      copy: Vec::from([0; MAX_HEAP_MEM])
+    }
+  }
+
+  /// Collects garbage and sets all addresses in the shadow stack
+  /// to the corresponding addresses in the post-garbage-collected heap
+  ///
+  /// ## Parameters
+  ///
+  /// * ss - The shadow stack to use as the root set
+  pub fn collect(&mut self, ss : &mut Vec<HeapAddr>) {
+    let mut scan_ptr : usize = 0;
+    let mut free_ptr : usize = 0;
+
+    for i in 0..ss.len() {
+      ss[i] = free_ptr.try_into().unwrap();
+      self.copy(ss[i].try_into().unwrap(), &mut free_ptr);
+    }
+
+    while scan_ptr != free_ptr {
+      // examine object at scan ptr
+      // redirect all references, copying any encountered references that haven't yet been copied
+      self.update(&mut scan_ptr, &mut free_ptr);
+    }
+
+    swap(&mut self.data, &mut self.copy);
+
+    self.next_addr = scan_ptr;
+  }
+
+  /// * obj_ptr - object address in 'data' heap
+  /// * free_ptr - free pointer in 'copy' heap
+  ///
+  /// Given a 'data' heap address *obj_ptr*, either return the forwarding pointer if it has one,
+  /// or otherwise copy it to the 'copy' heap at *free_ptr*, change it to a forwarding pointer in the 'data' heap,
+  /// increment *free_ptr* to directly after the newly copied object, and return the copy-heap address of the newly copied object.
+  fn update_obj(&mut self, obj_ptr: usize, free_ptr : &mut usize) -> usize {
+    match self.data[obj_ptr] {
+      TAG_FORWARDING_PTR => {
+        let forwarding_addr = u32::from_le_bytes([self.copy[obj_ptr + 1], self.copy[obj_ptr + 2], self.copy[obj_ptr + 3], self.copy[obj_ptr + 4]]);
+        forwarding_addr.try_into().unwrap()
+      },
+      _ => {
+        let result_addr = *free_ptr;
+        self.copy( obj_ptr, free_ptr);
+
+        self.data[obj_ptr] = TAG_FORWARDING_PTR;
+        let result_bytes = TryInto::<u32>::try_into(result_addr).unwrap().to_le_bytes();
+        self.data[obj_ptr + 1] = result_bytes[0];
+        self.data[obj_ptr + 2] = result_bytes[1];
+        self.data[obj_ptr + 3] = result_bytes[2];
+        self.data[obj_ptr + 4] = result_bytes[3];
+
+        result_addr
+      }
+    }
+  }
+
+  fn update(&mut self, scan_ptr : &mut usize, free_ptr : &mut usize) {
+    match self.copy[*scan_ptr] {
+      TAG_BASIC => { }, // no pointers to update
+      TAG_CLOSURE => {
+        let globals_addr : usize = u32::from_le_bytes([self.copy[*scan_ptr + 5], self.copy[*scan_ptr + 6], self.copy[*scan_ptr + 7], self.copy[*scan_ptr + 8]]).try_into().unwrap();
+        let new_globals_addr = self.update_obj(globals_addr, free_ptr);
+        self.copy[(*scan_ptr + 5)..(*scan_ptr + 8)].copy_from_slice(&new_globals_addr.to_le_bytes());
+        *scan_ptr += 13;
+      },
+      TAG_FUNCTION => {
+        let args_addr : usize = u32::from_le_bytes([self.copy[*scan_ptr + 5], self.copy[*scan_ptr + 6], self.copy[*scan_ptr + 7], self.copy[*scan_ptr + 8]]).try_into().unwrap();
+        let globals_addr : usize = u32::from_le_bytes([self.copy[*scan_ptr + 9], self.copy[*scan_ptr + 10], self.copy[*scan_ptr + 11], self.copy[*scan_ptr + 12]]).try_into().unwrap();
+
+        let new_args_addr = self.update_obj(args_addr, free_ptr);
+        let new_globals_addr = self.update_obj(globals_addr, free_ptr);
+
+        self.copy[*scan_ptr+5 .. *scan_ptr+9].copy_from_slice(&new_args_addr.to_le_bytes());
+        self.copy[*scan_ptr+9 .. *scan_ptr+13].copy_from_slice(&new_globals_addr.to_le_bytes());
+
+        *scan_ptr += 13;
+      },
+      TAG_VECTOR => {
+        // TODO: change i32 below to u32
+        let num_elems : usize = i32::from_le_bytes([self.copy[*scan_ptr + 1], self.copy[*scan_ptr + 2], self.copy[*scan_ptr + 3], self.copy[*scan_ptr + 4]]).try_into().unwrap();
+        let i = *scan_ptr + 5;
+        let after = *scan_ptr + 5 + num_elems*4;
+        while i < after {
+          let addr : usize = u32::from_le_bytes([self.copy[i + 0], self.copy[i + 1], self.copy[i + 2], self.copy[i + 3]]).try_into().unwrap();
+          let new_addr = self.update_obj(addr, free_ptr);
+          self.copy[i+0..i+4].copy_from_slice(&new_addr.to_le_bytes());
+        }
+        *scan_ptr = after;
+      },
+      TAG_REF => {
+        let content_addr : usize = u32::from_le_bytes([self.copy[*scan_ptr + 1], self.copy[*scan_ptr + 2], self.copy[*scan_ptr + 3], self.copy[*scan_ptr + 4]]).try_into().unwrap();
+        let new_content_addr = self.update_obj(content_addr, free_ptr);
+        self.copy[*scan_ptr+1..*scan_ptr+5].copy_from_slice(&new_content_addr.to_le_bytes());
+        *scan_ptr += 5;
+      },
+      TAG_TUPLE => {
+        let vec_addr : usize = u32::from_le_bytes([self.copy[*scan_ptr + 1], self.copy[*scan_ptr + 2], self.copy[*scan_ptr + 3], self.copy[*scan_ptr + 4]]).try_into().unwrap();
+        let new_vec_addr = self.update_obj(vec_addr, free_ptr);
+        self.copy[*scan_ptr+1..*scan_ptr+5].copy_from_slice(&new_vec_addr.to_le_bytes());
+        *scan_ptr += 5;
+      },
+      _ => {
+        panic!("invalid tag");
+      }
+    }
+  }
+
+  fn copy(&mut self, data_ind : usize, copy_ind : &mut usize) {
+    match self.data[data_ind] {
+      TAG_BASIC => {
+        self.copy[*copy_ind] = TAG_BASIC;
+        self.copy[*copy_ind + 1] = self.data[data_ind + 1];
+        self.copy[*copy_ind + 2] = self.data[data_ind + 2];
+        self.copy[*copy_ind + 3] = self.data[data_ind + 3];
+        self.copy[*copy_ind + 4] = self.data[data_ind + 4];
+        *copy_ind += 5;
+      },
+      TAG_CLOSURE => {
+        self.copy[*copy_ind] = TAG_CLOSURE;
+        self.copy[*copy_ind + 1] = self.data[data_ind + 1];
+        self.copy[*copy_ind + 2] = self.data[data_ind + 2];
+        self.copy[*copy_ind + 3] = self.data[data_ind + 3];
+        self.copy[*copy_ind + 4] = self.data[data_ind + 4];
+        self.copy[*copy_ind + 5] = self.data[data_ind + 5];
+        self.copy[*copy_ind + 6] = self.data[data_ind + 6];
+        self.copy[*copy_ind + 7] = self.data[data_ind + 7];
+        self.copy[*copy_ind + 8] = self.data[data_ind + 8];
+        self.copy[*copy_ind + 9] = self.data[data_ind + 9];
+        self.copy[*copy_ind + 10] = self.data[data_ind + 10];
+        self.copy[*copy_ind + 11] = self.data[data_ind + 11];
+        self.copy[*copy_ind + 12] = self.data[data_ind + 12];
+        *copy_ind += 13;
+      },
+      TAG_FUNCTION => {
+        self.copy[*copy_ind..*copy_ind+13].copy_from_slice(&self.data[data_ind..data_ind+13]);
+        // self.copy[*copy_ind] = TAG_FUNCTION;
+        // self.copy[*copy_ind + 1] = self.data[data_ind + 1];
+        // self.copy[*copy_ind + 2] = self.data[data_ind + 2];
+        // self.copy[*copy_ind + 3] = self.data[data_ind + 3];
+        // self.copy[*copy_ind + 4] = self.data[data_ind + 4];
+        // self.copy[*copy_ind + 5] = self.data[data_ind + 5];
+        // self.copy[*copy_ind + 6] = self.data[data_ind + 6];
+        // self.copy[*copy_ind + 7] = self.data[data_ind + 7];
+        // self.copy[*copy_ind + 8] = self.data[data_ind + 8];
+        // self.copy[*copy_ind + 9] = self.data[data_ind + 9];
+        // self.copy[*copy_ind + 10] = self.data[data_ind + 10];
+        // self.copy[*copy_ind + 11] = self.data[data_ind + 11];
+        // self.copy[*copy_ind + 12] = self.data[data_ind + 12];
+        *copy_ind += 13;
+      },
+      TAG_VECTOR => {
+        self.copy[*copy_ind] = TAG_VECTOR;
+        let length = i32::from_le_bytes([self.data[data_ind + 1], self.data[data_ind + 2], self.data[data_ind + 3], self.data[data_ind + 4]]);
+        self.copy[*copy_ind + 1] = self.data[data_ind + 1];
+        self.copy[*copy_ind + 2] = self.data[data_ind + 2];;
+        self.copy[*copy_ind + 3] = self.data[data_ind + 3];;
+        self.copy[*copy_ind + 4] = self.data[data_ind + 4];;
+
+        let mut i = *copy_ind + 5;
+        let upper_bound = *copy_ind + 5 + TryInto::<usize>::try_into(length).unwrap() * 4;
+        while i < upper_bound {
+          self.copy[i] = self.data[data_ind + i];
+          i += 4;
+        }
+        *copy_ind += upper_bound;
+      },
+      TAG_REF => {
+        self.copy[*copy_ind] = TAG_REF;
+        self.copy[*copy_ind + 1] = self.data[data_ind + 1];
+        self.copy[*copy_ind + 2] = self.data[data_ind + 2];
+        self.copy[*copy_ind + 3] = self.data[data_ind + 3];
+        self.copy[*copy_ind + 4] = self.data[data_ind + 4];
+        *copy_ind += 5;
+      },
+      TAG_SUM => {
+        self.copy[*copy_ind] = TAG_SUM;
+        self.copy[*copy_ind + 1] = self.data[data_ind + 1];
+        self.copy[*copy_ind + 2] = self.data[data_ind + 2];
+        self.copy[*copy_ind + 3] = self.data[data_ind + 3];
+        self.copy[*copy_ind + 4] = self.data[data_ind + 4];
+        self.copy[*copy_ind + 4] = self.data[data_ind + 5];
+        *copy_ind += 6;
+      },
+      TAG_TUPLE => {
+        self.copy[*copy_ind] = TAG_TUPLE;
+        self.copy[*copy_ind + 1] = self.data[data_ind + 1];
+        self.copy[*copy_ind + 2] = self.data[data_ind + 2];
+        self.copy[*copy_ind + 3] = self.data[data_ind + 3];
+        self.copy[*copy_ind + 4] = self.data[data_ind + 4];
+        *copy_ind += 5;
+      },
+      _ => {
+        panic!("invalid heap object tag");
+      }
     }
   }
 
@@ -83,7 +284,7 @@ impl Heap {
   pub fn expect_sum(&mut self, addr: HeapAddr) -> (u8, HeapAddr) {
     let addr = usize::try_from(addr).unwrap();
     assert!(self.data[addr] == TAG_SUM);
-    let args_addr = i32::from_le_bytes([self.data[addr+2], self.data[addr+3], self.data[addr+4], self.data[addr+5]]);
+    let args_addr = u32::from_le_bytes([self.data[addr+2], self.data[addr+3], self.data[addr+4], self.data[addr+5]]);
     (self.data[addr+1], args_addr)
   }
 
@@ -96,7 +297,7 @@ impl Heap {
     let addr = usize::try_from(addr).unwrap();
     assert!(self.data[addr] == TAG_CLOSURE);
     let code_addr = i32::from_le_bytes([self.data[addr + 1], self.data[addr + 2], self.data[addr + 3], self.data[addr + 4]]);
-    let globals_addr = i32::from_le_bytes([self.data[addr + 5], self.data[addr + 6], self.data[addr + 7], self.data[addr + 8]]);
+    let globals_addr = u32::from_le_bytes([self.data[addr + 5], self.data[addr + 6], self.data[addr + 7], self.data[addr + 8]]);
     (code_addr, globals_addr)
   }
 
@@ -104,8 +305,8 @@ impl Heap {
     let addr = usize::try_from(addr).unwrap();
     assert!(self.data[addr] == TAG_FUNCTION);
     let code_addr = i32::from_le_bytes([self.data[addr + 1], self.data[addr + 2], self.data[addr + 3], self.data[addr + 4]]);
-    let args_addr = i32::from_le_bytes([self.data[addr + 5], self.data[addr + 6], self.data[addr + 7], self.data[addr + 8]]);
-    let globals_addr = i32::from_le_bytes([self.data[addr + 9], self.data[addr + 10], self.data[addr + 11], self.data[addr + 12]]);
+    let args_addr = u32::from_le_bytes([self.data[addr + 5], self.data[addr + 6], self.data[addr + 7], self.data[addr + 8]]);
+    let globals_addr = u32::from_le_bytes([self.data[addr + 9], self.data[addr + 10], self.data[addr + 11], self.data[addr + 12]]);
     (code_addr, args_addr, globals_addr)
   }
 
@@ -115,11 +316,12 @@ impl Heap {
     let len = u32::from_le_bytes([self.data[addr + 1], self.data[addr + 2], self.data[addr + 3], self.data[addr + 4]])
       .try_into()
       .unwrap();
-    let mut res: Vec<i32> = Vec::<HeapAddr>::with_capacity(len);
+    let mut res: Vec<HeapAddr> = Vec::<HeapAddr>::with_capacity(len);
     let mut next_elem_addr = addr + 5;
     let last = addr + 1 + (len+1)*4;
     while next_elem_addr < last {
-      res.push(i32::from_le_bytes([self.data[next_elem_addr + 0], self.data[next_elem_addr + 1], self.data[next_elem_addr + 2], self.data[next_elem_addr + 3]]));
+      let addr = u32::from_le_bytes([self.data[next_elem_addr + 0], self.data[next_elem_addr + 1], self.data[next_elem_addr + 2], self.data[next_elem_addr + 3]]);
+      res.push(addr);
       next_elem_addr += 4;
     };
     res
@@ -128,7 +330,7 @@ impl Heap {
   pub fn expect_ref(&mut self, addr: HeapAddr) -> HeapAddr {
     let addr = usize::try_from(addr).unwrap();
     assert!(self.data[addr] == TAG_REF);
-    let content_addr = i32::from_le_bytes([self.data[addr + 1], self.data[addr + 2], self.data[addr + 3], self.data[addr + 4]]);
+    let content_addr = u32::from_le_bytes([self.data[addr + 1], self.data[addr + 2], self.data[addr + 3], self.data[addr + 4]]);
     content_addr
   }
 
@@ -147,7 +349,6 @@ impl Heap {
     let addr = usize::try_from(addr).unwrap();
     assert!(self.data[addr] == TAG_BASIC);
     let val = i32::from_le_bytes([self.data[addr + 1], self.data[addr + 2], self.data[addr + 3], self.data[addr + 4]]);
-    println!("get_basic {val}");
     val
   }
 
@@ -155,48 +356,87 @@ impl Heap {
   pub fn expect_tuple(&mut self, addr: HeapAddr) -> HeapAddr {
     let addr = usize::try_from(addr).unwrap();
     assert!(self.data[addr] == TAG_TUPLE);
-    let val = i32::from_le_bytes([self.data[addr + 1], self.data[addr + 2], self.data[addr + 3], self.data[addr + 4]]);
+    let val = u32::from_le_bytes([self.data[addr + 1], self.data[addr + 2], self.data[addr + 3], self.data[addr + 4]]);
     val
   }
 
-  pub fn new_vector(&mut self, elems: &[i32]) -> HeapAddr {
+  pub fn new_vector(&mut self, elems: &[HeapAddr], ss : &mut Vec<HeapAddr>) -> HeapAddr {
+    if self.next_addr + 5 + elems.len() >= self.data.len() {
+      self.collect(ss);
+    }
+
+    if self.next_addr + 5 + elems.len() >= self.data.len() {
+      panic!("Out of memory!")
+    }
     let ret = self.next_addr;
     self.write_u8(TAG_VECTOR);
     self.write_i32(elems.len().try_into().unwrap());
     for &elem in elems {
-      self.write_i32(elem);
+      self.write_u32(elem.try_into().unwrap());
     }
     ret.try_into().unwrap()
   }
 
-  pub fn new_tuple(&mut self, elems_addr: HeapAddr) -> HeapAddr {
+  pub fn new_tuple(&mut self, elems_addr: HeapAddr, ss: &mut Vec<HeapAddr>) -> HeapAddr {
+    if self.next_addr + 5 >= self.data.len() {
+      self.collect(ss);
+    }
+
+    if self.next_addr + 5 >= self.data.len() {
+      panic!("Out of memory!")
+    }
+
     let ret = self.next_addr;
     self.write_u8(TAG_TUPLE);
-    self.write_i32(elems_addr);
+    self.write_u32(elems_addr.try_into().unwrap());
     ret.try_into().unwrap()
   }
 
-  pub fn new_function(&mut self, code_addr : CodeAddr, arg_vec : HeapAddr, global_vec : HeapAddr) -> HeapAddr {
+  pub fn new_function(&mut self, code_addr : CodeAddr, arg_vec : HeapAddr, global_vec : HeapAddr, ss: &mut Vec<HeapAddr>) -> HeapAddr {
+    if self.next_addr + 13 >= self.data.len() {
+      self.collect(ss);
+    }
+
+    if self.next_addr + 13 >= self.data.len() {
+      panic!("Out of memory!")
+    }
+
     let ret = self.next_addr;
     self.write_u8(TAG_FUNCTION);
     self.write_i32(code_addr);
-    self.write_i32(arg_vec);
-    self.write_i32(global_vec);
+    self.write_u32(arg_vec.try_into().unwrap());
+    self.write_u32(global_vec.try_into().unwrap());
     println!("new function at {ret}");
     ret.try_into().unwrap()
   }
 
-  pub fn new_closure(&mut self, code_addr : CodeAddr, global_vec : HeapAddr) -> HeapAddr {
+  pub fn new_closure(&mut self, code_addr : CodeAddr, global_vec : HeapAddr, ss: &mut Vec<HeapAddr>) -> HeapAddr {
+    if self.next_addr + 13 >= self.data.len() {
+      self.collect(ss);
+    }
+
+    if self.next_addr + 13 >= self.data.len() {
+      panic!("Out of memory!")
+    }
+
     let ret = self.next_addr;
     self.write_u8(TAG_CLOSURE);
     self.write_i32(code_addr);
-    self.write_i32(global_vec);
+    self.write_u32(global_vec);
     // write an additional 32-bit word to ensure that closures occupy as much space a functions (enabling rewrite)
     self.write_i32(0);
     ret.try_into().unwrap()
   }
 
-  pub fn new_basic(&mut self, n : i32) -> HeapAddr {
+  pub fn new_basic(&mut self, n : i32, ss: &mut Vec<HeapAddr>) -> HeapAddr {
+    if self.next_addr + 5 >= self.data.len() {
+      self.collect(ss);
+    }
+
+    if self.next_addr + 5 >= self.data.len() {
+      panic!("Out of memory!")
+    }
+
     let ret = self.next_addr;
     self.write_u8(TAG_BASIC);
     self.write_i32(n);
@@ -205,18 +445,34 @@ impl Heap {
     ret.try_into().unwrap()
   }
 
-  pub fn new_ref(&mut self, n : i32) -> HeapAddr {
+  pub fn new_ref(&mut self, n : HeapAddr, ss: &mut Vec<HeapAddr>) -> HeapAddr {
+    if self.next_addr + 5 >= self.data.len() {
+      self.collect(ss);
+    }
+
+    if self.next_addr + 5 >= self.data.len() {
+      panic!("Out of memory!")
+    }
+
     let ret = self.next_addr;
     self.write_u8(TAG_REF);
-    self.write_i32(n);
+    self.write_u32(n.try_into().unwrap());
     ret.try_into().unwrap()
   }
 
-  pub fn new_sum(&mut self, variant_id: u8, arg_vec : HeapAddr) -> HeapAddr {
+  pub fn new_sum(&mut self, variant_id: u8, arg_vec : HeapAddr, ss: &mut Vec<HeapAddr>) -> HeapAddr {
+    if self.next_addr + 6 >= self.data.len() {
+      self.collect(ss);
+    }
+
+    if self.next_addr + 6 >= self.data.len() {
+      panic!("Out of memory!")
+    }
+
     let ret = self.next_addr;
     self.write_u8(TAG_SUM);
     self.write_u8(variant_id);
-    self.write_i32(arg_vec);
+    self.write_u32(arg_vec.try_into().unwrap());
     ret.try_into().unwrap()
   }
 
