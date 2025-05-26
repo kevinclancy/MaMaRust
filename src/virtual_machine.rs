@@ -65,12 +65,12 @@ impl VirtualMachine {
     for i in 0..n {
       vec[i] = self.ss[self.ssp + i]
     };
-    let vec_addr = self.heap.new_vector(&vec[..], &mut self.ss);
+    let vec_addr = self.heap.new_vector(&vec[..], &mut self.ss, self.ssp);
     self.ss[self.ssp] = vec_addr;
   }
 
   fn wrap(&mut self) {
-    let fun_addr = self.heap.new_function(self.pc, self.ss[self.ssp], self.gp, &mut self.ss);
+    let fun_addr = self.heap.new_function(self.pc, self.ss[self.ssp], self.gp, &mut self.ss, self.ssp);
     self.ss[self.ssp] = fun_addr;
   }
 
@@ -109,10 +109,21 @@ impl VirtualMachine {
     self.ssp -= 1;
   }
 
-  fn slide(&mut self, n: i32) {
-    let n : usize = n.try_into().unwrap();
-    self.ss[self.ssp - n] = self.ss[self.ssp];
-    self.ssp = self.ssp - n;
+  fn slide(&mut self, slide_distance: usize, num_elems_to_slide: usize) {
+    match slide_distance {
+      0 => { },
+      _ => {
+        if num_elems_to_slide == 0 {
+          self.ssp = self.ssp - slide_distance
+        } else {
+          self.ssp = self.ssp - slide_distance - num_elems_to_slide;
+          for _ in 0..num_elems_to_slide {
+            self.ssp = self.ssp + 1;
+            self.ss[self.ssp] = self.ss[self.ssp + slide_distance]
+          }
+        }
+      }
+    }
   }
 
   fn rewrite(&mut self, n: i32) {
@@ -189,7 +200,7 @@ impl VirtualMachine {
             0x0A => { // MkSum (variant_id)
               println!("MkSum");
               let variant_id = instr.to_le_bytes()[1];
-              let sum_addr = self.heap.new_sum(variant_id, self.ss[self.ssp], &mut self.ss);
+              let sum_addr = self.heap.new_sum(variant_id, self.ss[self.ssp], &mut self.ss, self.ssp);
               self.ss[self.ssp] = sum_addr;
               self.pc += 1;
             },
@@ -219,7 +230,7 @@ impl VirtualMachine {
             },
             0x0F => { // MkRef
               println!("MkRef");
-              self.ss[self.ssp] = self.heap.new_ref(self.ss[self.ssp], &mut self.ss);
+              self.ss[self.ssp] = self.heap.new_ref(self.ss[self.ssp], &mut self.ss, self.ssp);
               self.pc += 1;
             },
             0x10 => { // RefAssign
@@ -240,7 +251,7 @@ impl VirtualMachine {
             0x12 => { // MkBasic
               println!("MkBasic");
               self.ssp += 1;
-              self.ss[self.ssp] = self.heap.new_basic(self.s[self.sp], &mut self.ss);
+              self.ss[self.ssp] = self.heap.new_basic(self.s[self.sp], &mut self.ss, self.ssp);
               self.sp -= 1;
               self.pc += 1;
             },
@@ -262,10 +273,11 @@ impl VirtualMachine {
                 panic!("fewer than n globals");
               }
             },
-            0x15 => { // Slide(n)
-              let n : i32 = (instr & 0x00FFFF00) >> 8;
+            0x15 => { // Slide(n,m)
+              let n : i32 = (instr & 0x0000FF00) >> 8;
+              let m : i32 = (instr & 0x00FF0000) >> 16;
               println!("Slide {}",n);
-              self.slide(n);
+              self.slide(n.try_into().unwrap(), m.try_into().unwrap());
               self.pc += 1;
             },
             0x16 => { // GetVec
@@ -285,20 +297,20 @@ impl VirtualMachine {
               for i in 0..n {
                 vec[i] = self.ss[self.ssp + i];
               };
-              self.ss[self.ssp] = self.heap.new_vector(&vec[..], &mut self.ss);
+              self.ss[self.ssp] = self.heap.new_vector(&vec[..], &mut self.ss, self.ssp);
               self.pc += 1;
             },
             0x18 => { // MkFunVal(addr)
               let code_addr : i32 = (instr & 0x00FFFF00) >> 8;
               println!("MkFunVal {code_addr}");
-              let args_addr = self.heap.new_vector(&[0;0], &mut self.ss);
-              self.ss[self.ssp] = self.heap.new_function(code_addr, args_addr, self.ss[self.ssp], &mut self.ss);
+              let args_addr = self.heap.new_vector(&[0;0], &mut self.ss, self.ssp);
+              self.ss[self.ssp] = self.heap.new_function(code_addr, args_addr, self.ss[self.ssp], &mut self.ss, self.ssp);
               self.pc += 1;
             },
             0x19 => { // MkClos(addr)
               let code_addr : i32 = (instr & 0x00FFFF00) >> 8;
               println!("MkClos {code_addr}");
-              self.ss[self.ssp] = self.heap.new_closure(code_addr, self.ss[self.ssp], &mut self.ss);
+              self.ss[self.ssp] = self.heap.new_closure(code_addr, self.ss[self.ssp], &mut self.ss, self.ssp);
               self.pc += 1;
             },
             0x1A => { // Mark(return_addr)
@@ -328,7 +340,7 @@ impl VirtualMachine {
               if self.ssp - self.fp - 1 == num_formals.try_into().unwrap() {
                 self.popenv ()
               } else {
-                self.slide(num_formals);
+                self.slide(num_formals.try_into().unwrap(), 1);
                 self.apply();
               }
             },
@@ -336,7 +348,7 @@ impl VirtualMachine {
               let num_closures_to_alloc : usize = ((instr & 0x0000FF00) >> 8).try_into().unwrap();
               println!("Return {num_closures_to_alloc}");
               for i in 1..(num_closures_to_alloc + 1) {
-                self.ss[self.ssp + i] = self.heap.new_closure(0, 0, &mut self.ss);
+                self.ss[self.ssp + i] = self.heap.new_closure(0, 0, &mut self.ss, self.ssp);
               }
               self.ssp += num_closures_to_alloc;
               self.pc += 1;
@@ -401,7 +413,7 @@ impl VirtualMachine {
               self.sp -= 1;
             },
             0x28 => { //MkTuple
-              let tuple_addr = self.heap.new_tuple(self.ss[self.ssp], &mut self.ss);
+              let tuple_addr = self.heap.new_tuple(self.ss[self.ssp], &mut self.ss, self.ssp);
               self.ss[self.ssp] = tuple_addr;
               self.pc += 1;
             },

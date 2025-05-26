@@ -68,11 +68,13 @@ impl Heap {
   /// ## Parameters
   ///
   /// * ss - The shadow stack to use as the root set
-  pub fn collect(&mut self, ss : &mut Vec<HeapAddr>) {
+  pub fn collect(&mut self, ss: &mut Vec<HeapAddr>, ssp: usize) {
+    println!("collecting");
+
     let mut scan_ptr : usize = 0;
     let mut free_ptr : usize = 0;
 
-    for i in 0..ss.len() {
+    for i in 0..(ssp+1) {
       ss[i] = free_ptr.try_into().unwrap();
       self.copy(ss[i].try_into().unwrap(), &mut free_ptr);
     }
@@ -86,6 +88,7 @@ impl Heap {
     swap(&mut self.data, &mut self.copy);
 
     self.next_addr = scan_ptr;
+    println!("finished collecting");
   }
 
   /// * obj_ptr - object address in 'data' heap
@@ -94,11 +97,11 @@ impl Heap {
   /// Given a 'data' heap address *obj_ptr*, either return the forwarding pointer if it has one,
   /// or otherwise copy it to the 'copy' heap at *free_ptr*, change it to a forwarding pointer in the 'data' heap,
   /// increment *free_ptr* to directly after the newly copied object, and return the copy-heap address of the newly copied object.
-  fn update_obj(&mut self, obj_ptr: usize, free_ptr : &mut usize) -> usize {
+  fn update_obj(&mut self, obj_ptr: usize, free_ptr : &mut usize) -> u32 {
     match self.data[obj_ptr] {
       TAG_FORWARDING_PTR => {
-        let forwarding_addr = u32::from_le_bytes([self.copy[obj_ptr + 1], self.copy[obj_ptr + 2], self.copy[obj_ptr + 3], self.copy[obj_ptr + 4]]);
-        forwarding_addr.try_into().unwrap()
+        let forwarding_addr = u32::from_le_bytes([self.data[obj_ptr + 1], self.data[obj_ptr + 2], self.data[obj_ptr + 3], self.data[obj_ptr + 4]]);
+        forwarding_addr
       },
       _ => {
         let result_addr = *free_ptr;
@@ -111,7 +114,7 @@ impl Heap {
         self.data[obj_ptr + 3] = result_bytes[2];
         self.data[obj_ptr + 4] = result_bytes[3];
 
-        result_addr
+        result_addr.try_into().unwrap()
       }
     }
   }
@@ -140,12 +143,13 @@ impl Heap {
       TAG_VECTOR => {
         // TODO: change i32 below to u32
         let num_elems : usize = i32::from_le_bytes([self.copy[*scan_ptr + 1], self.copy[*scan_ptr + 2], self.copy[*scan_ptr + 3], self.copy[*scan_ptr + 4]]).try_into().unwrap();
-        let i = *scan_ptr + 5;
+        let mut i = *scan_ptr + 5;
         let after = *scan_ptr + 5 + num_elems*4;
         while i < after {
           let addr : usize = u32::from_le_bytes([self.copy[i + 0], self.copy[i + 1], self.copy[i + 2], self.copy[i + 3]]).try_into().unwrap();
           let new_addr = self.update_obj(addr, free_ptr);
           self.copy[i+0..i+4].copy_from_slice(&new_addr.to_le_bytes());
+          i += 4;
         }
         *scan_ptr = after;
       },
@@ -211,20 +215,10 @@ impl Heap {
         *copy_ind += 13;
       },
       TAG_VECTOR => {
-        self.copy[*copy_ind] = TAG_VECTOR;
         let length = i32::from_le_bytes([self.data[data_ind + 1], self.data[data_ind + 2], self.data[data_ind + 3], self.data[data_ind + 4]]);
-        self.copy[*copy_ind + 1] = self.data[data_ind + 1];
-        self.copy[*copy_ind + 2] = self.data[data_ind + 2];;
-        self.copy[*copy_ind + 3] = self.data[data_ind + 3];;
-        self.copy[*copy_ind + 4] = self.data[data_ind + 4];;
-
-        let mut i = *copy_ind + 5;
-        let upper_bound = *copy_ind + 5 + TryInto::<usize>::try_into(length).unwrap() * 4;
-        while i < upper_bound {
-          self.copy[i] = self.data[data_ind + i];
-          i += 4;
-        }
-        *copy_ind += upper_bound;
+        let num_bytes = TryInto::<usize>::try_into(length).unwrap() * 4;
+        self.copy[*copy_ind..*copy_ind+5+num_bytes].copy_from_slice(&self.data[data_ind..data_ind+5+num_bytes]);
+        *copy_ind += 5 + num_bytes;
       },
       TAG_REF => {
         self.copy[*copy_ind] = TAG_REF;
@@ -360,9 +354,9 @@ impl Heap {
     val
   }
 
-  pub fn new_vector(&mut self, elems: &[HeapAddr], ss : &mut Vec<HeapAddr>) -> HeapAddr {
+  pub fn new_vector(&mut self, elems: &[HeapAddr], ss : &mut Vec<HeapAddr>, ssp: usize) -> HeapAddr {
     if self.next_addr + 5 + elems.len() >= self.data.len() {
-      self.collect(ss);
+      self.collect(ss, ssp);
     }
 
     if self.next_addr + 5 + elems.len() >= self.data.len() {
@@ -377,9 +371,9 @@ impl Heap {
     ret.try_into().unwrap()
   }
 
-  pub fn new_tuple(&mut self, elems_addr: HeapAddr, ss: &mut Vec<HeapAddr>) -> HeapAddr {
+  pub fn new_tuple(&mut self, elems_addr: HeapAddr, ss: &mut Vec<HeapAddr>, ssp: usize) -> HeapAddr {
     if self.next_addr + 5 >= self.data.len() {
-      self.collect(ss);
+      self.collect(ss, ssp);
     }
 
     if self.next_addr + 5 >= self.data.len() {
@@ -392,9 +386,9 @@ impl Heap {
     ret.try_into().unwrap()
   }
 
-  pub fn new_function(&mut self, code_addr : CodeAddr, arg_vec : HeapAddr, global_vec : HeapAddr, ss: &mut Vec<HeapAddr>) -> HeapAddr {
+  pub fn new_function(&mut self, code_addr : CodeAddr, arg_vec : HeapAddr, global_vec : HeapAddr, ss: &mut Vec<HeapAddr>, ssp: usize) -> HeapAddr {
     if self.next_addr + 13 >= self.data.len() {
-      self.collect(ss);
+      self.collect(ss, ssp);
     }
 
     if self.next_addr + 13 >= self.data.len() {
@@ -410,9 +404,9 @@ impl Heap {
     ret.try_into().unwrap()
   }
 
-  pub fn new_closure(&mut self, code_addr : CodeAddr, global_vec : HeapAddr, ss: &mut Vec<HeapAddr>) -> HeapAddr {
+  pub fn new_closure(&mut self, code_addr : CodeAddr, global_vec : HeapAddr, ss: &mut Vec<HeapAddr>, ssp: usize) -> HeapAddr {
     if self.next_addr + 13 >= self.data.len() {
-      self.collect(ss);
+      self.collect(ss, ssp);
     }
 
     if self.next_addr + 13 >= self.data.len() {
@@ -428,9 +422,9 @@ impl Heap {
     ret.try_into().unwrap()
   }
 
-  pub fn new_basic(&mut self, n : i32, ss: &mut Vec<HeapAddr>) -> HeapAddr {
+  pub fn new_basic(&mut self, n : i32, ss: &mut Vec<HeapAddr>, ssp: usize) -> HeapAddr {
     if self.next_addr + 5 >= self.data.len() {
-      self.collect(ss);
+      self.collect(ss, ssp);
     }
 
     if self.next_addr + 5 >= self.data.len() {
@@ -445,9 +439,9 @@ impl Heap {
     ret.try_into().unwrap()
   }
 
-  pub fn new_ref(&mut self, n : HeapAddr, ss: &mut Vec<HeapAddr>) -> HeapAddr {
+  pub fn new_ref(&mut self, n : HeapAddr, ss: &mut Vec<HeapAddr>, ssp: usize) -> HeapAddr {
     if self.next_addr + 5 >= self.data.len() {
-      self.collect(ss);
+      self.collect(ss, ssp);
     }
 
     if self.next_addr + 5 >= self.data.len() {
@@ -460,9 +454,9 @@ impl Heap {
     ret.try_into().unwrap()
   }
 
-  pub fn new_sum(&mut self, variant_id: u8, arg_vec : HeapAddr, ss: &mut Vec<HeapAddr>) -> HeapAddr {
+  pub fn new_sum(&mut self, variant_id: u8, arg_vec : HeapAddr, ss: &mut Vec<HeapAddr>, ssp: usize) -> HeapAddr {
     if self.next_addr + 6 >= self.data.len() {
-      self.collect(ss);
+      self.collect(ss, ssp);
     }
 
     if self.next_addr + 6 >= self.data.len() {
