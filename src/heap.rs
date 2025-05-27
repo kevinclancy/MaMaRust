@@ -1,6 +1,6 @@
 use std::{mem::swap, slice};
 
-use crate::{virtual_machine::CodeAddr};
+use crate::{virtual_machine::CodeAddr, virtual_machine::VirtualMachine};
 
 const MAX_HEAP_MEM : usize = 10000;
 
@@ -32,26 +32,14 @@ impl Heap {
 
   fn write_i32(&mut self, to_write: i32) {
     let bytes = to_write.to_le_bytes();
-    self.data[self.next_addr] = bytes[0];
-    self.next_addr += 1;
-    self.data[self.next_addr] = bytes[1];
-    self.next_addr += 1;
-    self.data[self.next_addr] = bytes[2];
-    self.next_addr += 1;
-    self.data[self.next_addr] = bytes[3];
-    self.next_addr += 1;
+    self.data[self.next_addr..self.next_addr+4].copy_from_slice(&bytes);
+    self.next_addr += 4;
   }
 
   fn write_u32(&mut self, to_write: u32) {
     let bytes = to_write.to_le_bytes();
-    self.data[self.next_addr] = bytes[0];
-    self.next_addr += 1;
-    self.data[self.next_addr] = bytes[1];
-    self.next_addr += 1;
-    self.data[self.next_addr] = bytes[2];
-    self.next_addr += 1;
-    self.data[self.next_addr] = bytes[3];
-    self.next_addr += 1;
+    self.data[self.next_addr..self.next_addr+4].copy_from_slice(&bytes);
+    self.next_addr += 4;
   }
 
   pub fn create() -> Heap {
@@ -62,22 +50,23 @@ impl Heap {
     }
   }
 
-  /// Collects garbage and sets all addresses in the shadow stack
+  /// Collects garbage and sets global pointer and all addresses in the shadow stack
   /// to the corresponding addresses in the post-garbage-collected heap
-  ///
-  /// ## Parameters
-  ///
-  /// * ss - The shadow stack to use as the root set
-  pub fn collect(&mut self, ss: &mut Vec<HeapAddr>, ssp: usize) {
+  pub fn collect(&mut self, vm: &mut VirtualMachine) {
     println!("collecting");
 
     let mut scan_ptr : usize = 0;
     let mut free_ptr : usize = 0;
 
-    for i in 0..(ssp+1) {
-      ss[i] = free_ptr.try_into().unwrap();
-      self.copy(ss[i].try_into().unwrap(), &mut free_ptr);
+    for i in 0..(vm.ssp+1) {
+      let new_addr = free_ptr.try_into().unwrap();
+      self.copy(vm.ss[i].try_into().unwrap(), &mut free_ptr);
+      vm.ss[i] = new_addr;
     }
+
+    let new_gp_addr = free_ptr.try_into().unwrap();
+    self.copy(vm.gp.try_into().unwrap(), &mut free_ptr);
+    vm.gp = new_gp_addr;
 
     while scan_ptr != free_ptr {
       // examine object at scan ptr
@@ -121,7 +110,7 @@ impl Heap {
 
   fn update(&mut self, scan_ptr : &mut usize, free_ptr : &mut usize) {
     match self.copy[*scan_ptr] {
-      TAG_BASIC => { }, // no pointers to update
+      TAG_BASIC => { *scan_ptr += 5 }, // no pointers to update
       TAG_CLOSURE => {
         let globals_addr : usize = u32::from_le_bytes([self.copy[*scan_ptr + 5], self.copy[*scan_ptr + 6], self.copy[*scan_ptr + 7], self.copy[*scan_ptr + 8]]).try_into().unwrap();
         let new_globals_addr = self.update_obj(globals_addr, free_ptr);
@@ -174,44 +163,15 @@ impl Heap {
   fn copy(&mut self, data_ind : usize, copy_ind : &mut usize) {
     match self.data[data_ind] {
       TAG_BASIC => {
-        self.copy[*copy_ind] = TAG_BASIC;
-        self.copy[*copy_ind + 1] = self.data[data_ind + 1];
-        self.copy[*copy_ind + 2] = self.data[data_ind + 2];
-        self.copy[*copy_ind + 3] = self.data[data_ind + 3];
-        self.copy[*copy_ind + 4] = self.data[data_ind + 4];
+        self.copy[*copy_ind..*copy_ind+5].copy_from_slice(&self.data[data_ind..data_ind+5]);
         *copy_ind += 5;
       },
       TAG_CLOSURE => {
-        self.copy[*copy_ind] = TAG_CLOSURE;
-        self.copy[*copy_ind + 1] = self.data[data_ind + 1];
-        self.copy[*copy_ind + 2] = self.data[data_ind + 2];
-        self.copy[*copy_ind + 3] = self.data[data_ind + 3];
-        self.copy[*copy_ind + 4] = self.data[data_ind + 4];
-        self.copy[*copy_ind + 5] = self.data[data_ind + 5];
-        self.copy[*copy_ind + 6] = self.data[data_ind + 6];
-        self.copy[*copy_ind + 7] = self.data[data_ind + 7];
-        self.copy[*copy_ind + 8] = self.data[data_ind + 8];
-        self.copy[*copy_ind + 9] = self.data[data_ind + 9];
-        self.copy[*copy_ind + 10] = self.data[data_ind + 10];
-        self.copy[*copy_ind + 11] = self.data[data_ind + 11];
-        self.copy[*copy_ind + 12] = self.data[data_ind + 12];
+        self.copy[*copy_ind..*copy_ind+13].copy_from_slice(&self.data[data_ind..data_ind+13]);
         *copy_ind += 13;
       },
       TAG_FUNCTION => {
         self.copy[*copy_ind..*copy_ind+13].copy_from_slice(&self.data[data_ind..data_ind+13]);
-        // self.copy[*copy_ind] = TAG_FUNCTION;
-        // self.copy[*copy_ind + 1] = self.data[data_ind + 1];
-        // self.copy[*copy_ind + 2] = self.data[data_ind + 2];
-        // self.copy[*copy_ind + 3] = self.data[data_ind + 3];
-        // self.copy[*copy_ind + 4] = self.data[data_ind + 4];
-        // self.copy[*copy_ind + 5] = self.data[data_ind + 5];
-        // self.copy[*copy_ind + 6] = self.data[data_ind + 6];
-        // self.copy[*copy_ind + 7] = self.data[data_ind + 7];
-        // self.copy[*copy_ind + 8] = self.data[data_ind + 8];
-        // self.copy[*copy_ind + 9] = self.data[data_ind + 9];
-        // self.copy[*copy_ind + 10] = self.data[data_ind + 10];
-        // self.copy[*copy_ind + 11] = self.data[data_ind + 11];
-        // self.copy[*copy_ind + 12] = self.data[data_ind + 12];
         *copy_ind += 13;
       },
       TAG_VECTOR => {
@@ -221,28 +181,15 @@ impl Heap {
         *copy_ind += 5 + num_bytes;
       },
       TAG_REF => {
-        self.copy[*copy_ind] = TAG_REF;
-        self.copy[*copy_ind + 1] = self.data[data_ind + 1];
-        self.copy[*copy_ind + 2] = self.data[data_ind + 2];
-        self.copy[*copy_ind + 3] = self.data[data_ind + 3];
-        self.copy[*copy_ind + 4] = self.data[data_ind + 4];
+        self.copy[*copy_ind..*copy_ind+5].copy_from_slice(&self.data[data_ind..data_ind+5]);
         *copy_ind += 5;
       },
       TAG_SUM => {
-        self.copy[*copy_ind] = TAG_SUM;
-        self.copy[*copy_ind + 1] = self.data[data_ind + 1];
-        self.copy[*copy_ind + 2] = self.data[data_ind + 2];
-        self.copy[*copy_ind + 3] = self.data[data_ind + 3];
-        self.copy[*copy_ind + 4] = self.data[data_ind + 4];
-        self.copy[*copy_ind + 4] = self.data[data_ind + 5];
+        self.copy[*copy_ind..*copy_ind+6].copy_from_slice(&self.data[data_ind..data_ind+6]);
         *copy_ind += 6;
       },
       TAG_TUPLE => {
-        self.copy[*copy_ind] = TAG_TUPLE;
-        self.copy[*copy_ind + 1] = self.data[data_ind + 1];
-        self.copy[*copy_ind + 2] = self.data[data_ind + 2];
-        self.copy[*copy_ind + 3] = self.data[data_ind + 3];
-        self.copy[*copy_ind + 4] = self.data[data_ind + 4];
+        self.copy[*copy_ind..*copy_ind+5].copy_from_slice(&self.data[data_ind..data_ind+5]);
         *copy_ind += 5;
       },
       _ => {
@@ -287,7 +234,7 @@ impl Heap {
     self.data[addr] == TAG_CLOSURE
   }
 
-  pub fn expect_closure(&mut self, addr: HeapAddr) -> (CodeAddr, HeapAddr) {
+  pub fn expect_closure(&self, addr: HeapAddr) -> (CodeAddr, HeapAddr) {
     let addr = usize::try_from(addr).unwrap();
     assert!(self.data[addr] == TAG_CLOSURE);
     let code_addr = i32::from_le_bytes([self.data[addr + 1], self.data[addr + 2], self.data[addr + 3], self.data[addr + 4]]);
@@ -295,7 +242,7 @@ impl Heap {
     (code_addr, globals_addr)
   }
 
-  pub fn expect_function(&mut self, addr: HeapAddr) -> (CodeAddr, HeapAddr, HeapAddr) {
+  pub fn expect_function(&self, addr: HeapAddr) -> (CodeAddr, HeapAddr, HeapAddr) {
     let addr = usize::try_from(addr).unwrap();
     assert!(self.data[addr] == TAG_FUNCTION);
     let code_addr = i32::from_le_bytes([self.data[addr + 1], self.data[addr + 2], self.data[addr + 3], self.data[addr + 4]]);
@@ -304,7 +251,7 @@ impl Heap {
     (code_addr, args_addr, globals_addr)
   }
 
-  pub fn expect_vector(&mut self, addr: HeapAddr) -> Vec<HeapAddr> {
+  pub fn expect_vector(&self, addr: HeapAddr) -> Vec<HeapAddr> {
     let addr = usize::try_from(addr).unwrap();
     assert!(self.data[addr] == TAG_VECTOR);
     let len = u32::from_le_bytes([self.data[addr + 1], self.data[addr + 2], self.data[addr + 3], self.data[addr + 4]])
@@ -321,7 +268,7 @@ impl Heap {
     res
   }
 
-  pub fn expect_ref(&mut self, addr: HeapAddr) -> HeapAddr {
+  pub fn expect_ref(&self, addr: HeapAddr) -> HeapAddr {
     let addr = usize::try_from(addr).unwrap();
     assert!(self.data[addr] == TAG_REF);
     let content_addr = u32::from_le_bytes([self.data[addr + 1], self.data[addr + 2], self.data[addr + 3], self.data[addr + 4]]);
@@ -339,7 +286,7 @@ impl Heap {
     self.data[ref_addr + 4] = bytes[3];
   }
 
-  pub fn expect_basic(&mut self, addr: HeapAddr) -> i32 {
+  pub fn expect_basic(&self, addr: HeapAddr) -> i32 {
     let addr = usize::try_from(addr).unwrap();
     assert!(self.data[addr] == TAG_BASIC);
     let val = i32::from_le_bytes([self.data[addr + 1], self.data[addr + 2], self.data[addr + 3], self.data[addr + 4]]);
@@ -347,16 +294,16 @@ impl Heap {
   }
 
   /// Asserts the existence of tuple at addr. Returns the heap address of the tuple's element vector.
-  pub fn expect_tuple(&mut self, addr: HeapAddr) -> HeapAddr {
+  pub fn expect_tuple(&self, addr: HeapAddr) -> HeapAddr {
     let addr = usize::try_from(addr).unwrap();
     assert!(self.data[addr] == TAG_TUPLE);
     let val = u32::from_le_bytes([self.data[addr + 1], self.data[addr + 2], self.data[addr + 3], self.data[addr + 4]]);
     val
   }
 
-  pub fn new_vector(&mut self, elems: &[HeapAddr], ss : &mut Vec<HeapAddr>, ssp: usize) -> HeapAddr {
+  pub fn new_vector(&mut self, elems: &[HeapAddr], vm : &mut VirtualMachine) -> HeapAddr {
     if self.next_addr + 5 + elems.len() >= self.data.len() {
-      self.collect(ss, ssp);
+      self.collect(vm);
     }
 
     if self.next_addr + 5 + elems.len() >= self.data.len() {
@@ -371,9 +318,9 @@ impl Heap {
     ret.try_into().unwrap()
   }
 
-  pub fn new_tuple(&mut self, elems_addr: HeapAddr, ss: &mut Vec<HeapAddr>, ssp: usize) -> HeapAddr {
+  pub fn new_tuple(&mut self, elems_addr: HeapAddr, vm: &mut VirtualMachine) -> HeapAddr {
     if self.next_addr + 5 >= self.data.len() {
-      self.collect(ss, ssp);
+      self.collect(vm);
     }
 
     if self.next_addr + 5 >= self.data.len() {
@@ -386,9 +333,9 @@ impl Heap {
     ret.try_into().unwrap()
   }
 
-  pub fn new_function(&mut self, code_addr : CodeAddr, arg_vec : HeapAddr, global_vec : HeapAddr, ss: &mut Vec<HeapAddr>, ssp: usize) -> HeapAddr {
+  pub fn new_function(&mut self, code_addr : CodeAddr, arg_vec : HeapAddr, global_vec : HeapAddr, vm: &mut VirtualMachine) -> HeapAddr {
     if self.next_addr + 13 >= self.data.len() {
-      self.collect(ss, ssp);
+      self.collect(vm);
     }
 
     if self.next_addr + 13 >= self.data.len() {
@@ -404,9 +351,9 @@ impl Heap {
     ret.try_into().unwrap()
   }
 
-  pub fn new_closure(&mut self, code_addr : CodeAddr, global_vec : HeapAddr, ss: &mut Vec<HeapAddr>, ssp: usize) -> HeapAddr {
+  pub fn new_closure(&mut self, code_addr : CodeAddr, global_vec : HeapAddr, vm: &mut VirtualMachine) -> HeapAddr {
     if self.next_addr + 13 >= self.data.len() {
-      self.collect(ss, ssp);
+      self.collect(vm);
     }
 
     if self.next_addr + 13 >= self.data.len() {
@@ -422,9 +369,9 @@ impl Heap {
     ret.try_into().unwrap()
   }
 
-  pub fn new_basic(&mut self, n : i32, ss: &mut Vec<HeapAddr>, ssp: usize) -> HeapAddr {
+  pub fn new_basic(&mut self, n : i32, vm: &mut VirtualMachine) -> HeapAddr {
     if self.next_addr + 5 >= self.data.len() {
-      self.collect(ss, ssp);
+      self.collect(vm);
     }
 
     if self.next_addr + 5 >= self.data.len() {
@@ -439,9 +386,9 @@ impl Heap {
     ret.try_into().unwrap()
   }
 
-  pub fn new_ref(&mut self, n : HeapAddr, ss: &mut Vec<HeapAddr>, ssp: usize) -> HeapAddr {
+  pub fn new_ref(&mut self, n : HeapAddr, vm: &mut VirtualMachine) -> HeapAddr {
     if self.next_addr + 5 >= self.data.len() {
-      self.collect(ss, ssp);
+      self.collect(vm);
     }
 
     if self.next_addr + 5 >= self.data.len() {
@@ -454,9 +401,9 @@ impl Heap {
     ret.try_into().unwrap()
   }
 
-  pub fn new_sum(&mut self, variant_id: u8, arg_vec : HeapAddr, ss: &mut Vec<HeapAddr>, ssp: usize) -> HeapAddr {
+  pub fn new_sum(&mut self, variant_id: u8, arg_vec : HeapAddr, vm: &mut VirtualMachine) -> HeapAddr {
     if self.next_addr + 6 >= self.data.len() {
-      self.collect(ss, ssp);
+      self.collect(vm);
     }
 
     if self.next_addr + 6 >= self.data.len() {
@@ -469,5 +416,4 @@ impl Heap {
     self.write_u32(arg_vec.try_into().unwrap());
     ret.try_into().unwrap()
   }
-
 }
