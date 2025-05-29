@@ -9,12 +9,12 @@ fn mkvec0(vm : &mut VirtualMachine, heap: &mut Heap) {
   for i in 0..n {
     vec[i] = vm.ss[vm.ssp + i]
   };
-  let vec_addr = heap.new_vector(&vec[..], vm);
+  let vec_addr = heap.new_vector(&vec[..], vm.roots());
   vm.ss[vm.ssp] = vec_addr;
 }
 
 fn wrap(vm: &mut VirtualMachine, heap: &mut Heap) {
-  let fun_addr = heap.new_function(vm.pc, vm.ss[vm.ssp], vm.gp, vm);
+  let fun_addr = heap.new_function(vm.pc, vm.ss[vm.ssp], vm.gp, vm.roots());
   vm.ss[vm.ssp] = fun_addr;
 }
 
@@ -146,7 +146,7 @@ pub fn execute(vm: &mut VirtualMachine) -> i32 {
           0x0A => { // MkSum (variant_id)
             println!("MkSum");
             let variant_id = instr.to_le_bytes()[1];
-            let sum_addr = heap.new_sum(variant_id, vm.ss[vm.ssp], vm);
+            let sum_addr = heap.new_sum(variant_id, vm.ss[vm.ssp], vm.ss[0..vm.ssp+1].iter_mut().chain([&mut vm.gp]));
             vm.ss[vm.ssp] = sum_addr;
             vm.pc += 1;
           },
@@ -176,7 +176,7 @@ pub fn execute(vm: &mut VirtualMachine) -> i32 {
           },
           0x0F => { // MkRef
             println!("MkRef");
-            vm.ss[vm.ssp] = heap.new_ref(vm.ss[vm.ssp], vm);
+            vm.ss[vm.ssp] = heap.new_ref(vm.ss[vm.ssp], vm.roots());
             vm.pc += 1;
           },
           0x10 => { // RefAssign
@@ -197,7 +197,7 @@ pub fn execute(vm: &mut VirtualMachine) -> i32 {
           0x12 => { // MkBasic
             println!("MkBasic");
             vm.ssp += 1;
-            vm.ss[vm.ssp] = heap.new_basic(vm.s[vm.sp], vm);
+            vm.ss[vm.ssp] = heap.new_basic(vm.s[vm.sp], vm.roots());
             vm.sp -= 1;
             vm.pc += 1;
           },
@@ -243,20 +243,20 @@ pub fn execute(vm: &mut VirtualMachine) -> i32 {
             for i in 0..n {
               vec[i] = vm.ss[vm.ssp + i];
             };
-            vm.ss[vm.ssp] = heap.new_vector(&vec[..], vm);
+            vm.ss[vm.ssp] = heap.new_vector(&vec[..], vm.roots());
             vm.pc += 1;
           },
           0x18 => { // MkFunVal(addr)
             let code_addr : i32 = (instr & 0x00FFFF00) >> 8;
             println!("MkFunVal {code_addr}");
-            let args_addr = heap.new_vector(&[0;0], vm);
-            vm.ss[vm.ssp] = heap.new_function(code_addr, args_addr, vm.ss[vm.ssp], vm);
+            let args_addr = heap.new_vector(&[0;0], vm.roots());
+            vm.ss[vm.ssp] = heap.new_function(code_addr, args_addr, vm.ss[vm.ssp], vm.roots());
             vm.pc += 1;
           },
           0x19 => { // MkClos(addr)
             let code_addr : i32 = (instr & 0x00FFFF00) >> 8;
             println!("MkClos {code_addr}");
-            vm.ss[vm.ssp] = heap.new_closure(code_addr, vm.ss[vm.ssp], vm);
+            vm.ss[vm.ssp] = heap.new_closure(code_addr, vm.ss[vm.ssp], vm.roots());
             vm.pc += 1;
           },
           0x1A => { // Mark(return_addr)
@@ -294,7 +294,7 @@ pub fn execute(vm: &mut VirtualMachine) -> i32 {
             let num_closures_to_alloc : usize = ((instr & 0x0000FF00) >> 8).try_into().unwrap();
             println!("Return {num_closures_to_alloc}");
             for i in 1..(num_closures_to_alloc + 1) {
-              vm.ss[vm.ssp + i] = heap.new_closure(0, 0, vm);
+              vm.ss[vm.ssp + i] = heap.new_closure(0, 0, vm.roots());
             }
             vm.ssp += num_closures_to_alloc;
             vm.pc += 1;
@@ -359,7 +359,7 @@ pub fn execute(vm: &mut VirtualMachine) -> i32 {
             vm.sp -= 1;
           },
           0x28 => { //MkTuple
-            let tuple_addr = heap.new_tuple(vm.ss[vm.ssp], vm);
+            let tuple_addr = heap.new_tuple(vm.ss[vm.ssp], vm.roots());
             vm.ss[vm.ssp] = tuple_addr;
             vm.pc += 1;
           },

@@ -50,3 +50,9 @@ pub fn from_file(file_name : &str) -> VirtualMachine {
     pc: 0
   }
 }
+
+impl VirtualMachine {
+  pub fn roots(&mut self) -> impl Iterator<Item = &mut HeapAddr> {
+    self.ss[0..self.ssp+1].iter_mut().chain([&mut self.gp])
+  }
+}

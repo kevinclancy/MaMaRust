@@ -50,23 +50,19 @@ impl Heap {
     }
   }
 
-  /// Collects garbage and sets global pointer and all addresses in the shadow stack
-  /// to the corresponding addresses in the post-garbage-collected heap
-  pub fn collect(&mut self, vm: &mut VirtualMachine) {
+  /// Collects garbage unreachable from roots and sets the roots to the corresponding addresses
+  /// in the post-garbage-collected heap
+  pub fn collect<'a>(&mut self, roots: impl Iterator<Item = &'a mut HeapAddr>) {
     println!("collecting");
 
     let mut scan_ptr : usize = 0;
     let mut free_ptr : usize = 0;
 
-    for i in 0..(vm.ssp+1) {
+    for r in roots {
       let new_addr = free_ptr.try_into().unwrap();
-      self.copy(vm.ss[i].try_into().unwrap(), &mut free_ptr);
-      vm.ss[i] = new_addr;
+      self.copy((*r).try_into().unwrap(), &mut free_ptr);
+      *r = new_addr;
     }
-
-    let new_gp_addr = free_ptr.try_into().unwrap();
-    self.copy(vm.gp.try_into().unwrap(), &mut free_ptr);
-    vm.gp = new_gp_addr;
 
     while scan_ptr != free_ptr {
       // examine object at scan ptr
@@ -301,9 +297,9 @@ impl Heap {
     val
   }
 
-  pub fn new_vector(&mut self, elems: &[HeapAddr], vm : &mut VirtualMachine) -> HeapAddr {
+  pub fn new_vector<'a>(&mut self, elems: &[HeapAddr], roots: impl Iterator<Item = &'a mut HeapAddr>) -> HeapAddr {
     if self.next_addr + 5 + elems.len() >= self.data.len() {
-      self.collect(vm);
+      self.collect(roots);
     }
 
     if self.next_addr + 5 + elems.len() >= self.data.len() {
@@ -318,9 +314,9 @@ impl Heap {
     ret.try_into().unwrap()
   }
 
-  pub fn new_tuple(&mut self, elems_addr: HeapAddr, vm: &mut VirtualMachine) -> HeapAddr {
+  pub fn new_tuple<'a>(&mut self, elems_addr: HeapAddr, roots: impl Iterator<Item = &'a mut HeapAddr>) -> HeapAddr {
     if self.next_addr + 5 >= self.data.len() {
-      self.collect(vm);
+      self.collect(roots);
     }
 
     if self.next_addr + 5 >= self.data.len() {
@@ -333,9 +329,9 @@ impl Heap {
     ret.try_into().unwrap()
   }
 
-  pub fn new_function(&mut self, code_addr : CodeAddr, arg_vec : HeapAddr, global_vec : HeapAddr, vm: &mut VirtualMachine) -> HeapAddr {
+  pub fn new_function<'a>(&mut self, code_addr : CodeAddr, arg_vec : HeapAddr, global_vec : HeapAddr, roots: impl Iterator<Item = &'a mut HeapAddr>) -> HeapAddr {
     if self.next_addr + 13 >= self.data.len() {
-      self.collect(vm);
+      self.collect(roots);
     }
 
     if self.next_addr + 13 >= self.data.len() {
@@ -351,9 +347,9 @@ impl Heap {
     ret.try_into().unwrap()
   }
 
-  pub fn new_closure(&mut self, code_addr : CodeAddr, global_vec : HeapAddr, vm: &mut VirtualMachine) -> HeapAddr {
+  pub fn new_closure<'a>(&mut self, code_addr : CodeAddr, global_vec : HeapAddr, roots: impl Iterator<Item = &'a mut HeapAddr>) -> HeapAddr {
     if self.next_addr + 13 >= self.data.len() {
-      self.collect(vm);
+      self.collect(roots);
     }
 
     if self.next_addr + 13 >= self.data.len() {
@@ -369,9 +365,9 @@ impl Heap {
     ret.try_into().unwrap()
   }
 
-  pub fn new_basic(&mut self, n : i32, vm: &mut VirtualMachine) -> HeapAddr {
+  pub fn new_basic<'a>(&mut self, n : i32, roots: impl Iterator<Item = &'a mut HeapAddr>) -> HeapAddr {
     if self.next_addr + 5 >= self.data.len() {
-      self.collect(vm);
+      self.collect(roots);
     }
 
     if self.next_addr + 5 >= self.data.len() {
@@ -386,9 +382,9 @@ impl Heap {
     ret.try_into().unwrap()
   }
 
-  pub fn new_ref(&mut self, n : HeapAddr, vm: &mut VirtualMachine) -> HeapAddr {
+  pub fn new_ref<'a>(&mut self, n : HeapAddr, roots: impl Iterator<Item = &'a mut HeapAddr>) -> HeapAddr {
     if self.next_addr + 5 >= self.data.len() {
-      self.collect(vm);
+      self.collect(roots);
     }
 
     if self.next_addr + 5 >= self.data.len() {
@@ -401,9 +397,9 @@ impl Heap {
     ret.try_into().unwrap()
   }
 
-  pub fn new_sum(&mut self, variant_id: u8, arg_vec : HeapAddr, vm: &mut VirtualMachine) -> HeapAddr {
+  pub fn new_sum<'a>(&mut self, variant_id: u8, arg_vec : HeapAddr, roots: impl Iterator<Item = &'a mut HeapAddr>) -> HeapAddr {
     if self.next_addr + 6 >= self.data.len() {
-      self.collect(vm);
+      self.collect(roots);
     }
 
     if self.next_addr + 6 >= self.data.len() {
@@ -415,5 +411,28 @@ impl Heap {
     self.write_u8(variant_id);
     self.write_u32(arg_vec.try_into().unwrap());
     ret.try_into().unwrap()
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn alloc_retain_basic() {
+      let mut heap = Heap::create();
+      let mut basic_addr = heap.new_basic(3, [].iter_mut());
+      heap.collect([&mut basic_addr].into_iter());
+      let n = heap.expect_basic(basic_addr);
+      assert_eq!(n, 3);
+  }
+
+  #[test]
+  #[should_panic]
+  fn alloc_collect_basic() {
+      let mut heap = Heap::create();
+      let mut basic_addr = heap.new_basic(3, [].iter_mut());
+      heap.collect([].into_iter());
+      heap.expect_basic(basic_addr);
   }
 }
