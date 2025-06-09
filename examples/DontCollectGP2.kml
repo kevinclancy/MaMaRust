@@ -1,0 +1,10 @@
+let rec mkFoo : (() -> (int -> int)) =
+  (fun (_ : ()) ->
+    let a = ref 0 in
+    let rec foo : (int -> int) =
+        (fun (z : int) -> a := !a + 1; if z == 100000 then !a else (foo (z + 1)))
+    in
+    foo
+  )
+in
+((mkFoo ()) 0)

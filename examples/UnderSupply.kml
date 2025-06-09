@@ -1,0 +1,2 @@
+let a = (fun (x : int) (y : int) -> x + y) in
+((a 3) 2)
