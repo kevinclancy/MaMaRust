@@ -1,3 +1,9 @@
 pub mod heap;
 pub mod exec;
 pub mod virtual_machine;
+pub mod syntax;
+pub mod parser;
+pub mod code_builder;
+pub mod gen_code;
+pub mod test_utils;
+pub mod address_resolution;

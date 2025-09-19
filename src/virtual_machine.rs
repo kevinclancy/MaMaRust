@@ -51,6 +51,20 @@ pub fn from_file(file_name : &str) -> VirtualMachine {
   }
 }
 
+/// Create new virtual machine from instruction vector
+pub fn from_instructions(instructions: Vec<i32>) -> VirtualMachine {
+  VirtualMachine {
+    s: Vec::from([0 as i32; MAX_STACK_MEM/4]),
+    sp: 0,
+    ss: Vec::from([0 as u32; MAX_STACK_MEM/4]),
+    ssp: 0,
+    gp: 0,
+    fp: 0,
+    instructions,
+    pc: 0
+  }
+}
+
 impl VirtualMachine {
   pub fn roots(&mut self) -> impl Iterator<Item = &mut HeapAddr> {
     self.ss[0..self.ssp+1].iter_mut().chain([&mut self.gp])
