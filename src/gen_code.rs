@@ -273,6 +273,60 @@ pub fn code_v(
                 )
             ))
         },
+        Expr::FunAbstraction { formals, body, range } => {
+            let free_var_list : Vec<String> = expr.free_vars().iter().cloned().collect();
+            let global_vars : Vec<(Ty, i32)> = free_var_list.iter().map(
+                |var| get_var(ctxt, var, range, stack_level + 1)
+            ).collect::<Result<Vec<_>, _>>()?;
+            let push_globals : Vector<i32> = global_vars.iter().map(|(_, instr)| *instr).collect();
+            let execute_body_addr = addr_gen.fresh_addr();
+            let after_addr = addr_gen.fresh_addr();
+
+            let mut body_ctxt = ctxt.clone();
+            for (i, formal) in formals.iter().enumerate() {
+                let var_entry = VarContextEntry {
+                    address: Address::Local(-(i as i16)),
+                    ty: formal.ty.clone()
+                };
+                body_ctxt.var_ctxt = body_ctxt.var_ctxt.update(formal.name.clone(), var_entry);
+            }
+            for (i, (var_name, (ty, _))) in free_var_list.iter().zip(global_vars.iter()).enumerate() {
+                let var_entry = VarContextEntry {
+                    address: Address::Global(i as u16),
+                    ty: ty.clone()
+                };
+                body_ctxt.var_ctxt = body_ctxt.var_ctxt.update(var_name.clone(), var_entry);
+            }
+
+            let (body_ty, body_code) = code_v(&body_ctxt, addr_gen, body, formals.len() as i16)?;
+
+            let fun_ty = formals.iter().rev().fold(body_ty, |acc, formal| {
+                Ty::FunTy {
+                    dom: Box::new(formal.ty.clone()),
+                    cod: Box::new(acc),
+                    range: Range::dummy()
+                }
+            });
+            Ok((
+                fun_ty,
+                (
+                    push_globals +
+                    vector![
+                        instr::mk_vec(global_vars.len() as u16),
+                        instr::mk_clos(execute_body_addr),
+                        instr::jump(after_addr),
+                        instr::symbolic_addr(execute_body_addr),
+                        instr::targ(formals.len() as u8)
+                    ] +
+                    body_code +
+                    vector![
+                        instr::return_(formals.len() as u8),
+                        instr::update(),
+                        instr::symbolic_addr(after_addr)
+                    ]
+                )
+            ))
+        },
         Expr::Let{ bound_var, bind_to, body, .. } => {
             let (ty_bound, code_bound) = code_v(ctxt, addr_gen, bind_to, stack_level)?;
             let var_entry = VarContextEntry { address: Address::Local(stack_level + 1), ty: ty_bound };

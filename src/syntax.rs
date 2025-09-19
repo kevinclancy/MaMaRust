@@ -201,6 +201,124 @@ impl Expr {
             | Expr::Assign { range, .. } | Expr::Sequence { range, .. } => range,
         }
     }
+
+    pub fn free_vars(&self) -> HashSet<String> {
+        match self {
+            Expr::Plus(e1, e2, _) | Expr::Minus(e1, e2, _) | Expr::Times(e1, e2, _)
+            | Expr::Eq(e1, e2, _) | Expr::Leq(e1, e2, _) | Expr::Geq(e1, e2, _)
+            | Expr::Lt(e1, e2, _) | Expr::Gt(e1, e2, _) => {
+                e1.free_vars().union(&e2.free_vars()).cloned().collect()
+            }
+
+            Expr::FunAbstraction { formals, body, .. } => {
+                let formal_names: HashSet<String> = formals.iter()
+                    .map(|f| f.name.clone())
+                    .collect();
+                body.free_vars().difference(&formal_names).cloned().collect()
+            }
+
+            Expr::Var(name, _) => {
+                let mut set = HashSet::new();
+                set.insert(name.clone());
+                set
+            }
+
+            Expr::Let { bound_var, bind_to, body, .. } => {
+                let mut body_free = body.free_vars();
+                body_free.remove(bound_var);
+                bind_to.free_vars().union(&body_free).cloned().collect()
+            }
+
+            Expr::LetRec { bindings, body, .. } => {
+                let bound_names: HashSet<String> = bindings.iter()
+                    .map(|(name, _, _)| name.clone())
+                    .collect();
+
+                let mut all_free = HashSet::new();
+                for (_, _, expr) in bindings {
+                    all_free.extend(expr.free_vars().difference(&bound_names).cloned());
+                }
+                all_free.extend(body.free_vars().difference(&bound_names).cloned());
+                all_free
+            }
+
+            Expr::Application { fn_expr, args, .. } => {
+                let mut all_free = fn_expr.free_vars();
+                for arg in args {
+                    all_free.extend(arg.free_vars());
+                }
+                all_free
+            }
+
+            Expr::ConstructorApplication { arg, .. } => {
+                arg.free_vars()
+            }
+
+            Expr::Match { scrutinee, cases, .. } => {
+                let mut all_free = scrutinee.free_vars();
+                for case in cases {
+                    match case {
+                        MatchCase::ConstructorCase { arg_var, when_cond, body, .. } => {
+                            let mut case_free = body.free_vars();
+                            case_free.remove(arg_var);
+                            all_free.extend(case_free);
+                            if let Some(cond) = when_cond {
+                                let mut cond_free = cond.free_vars();
+                                cond_free.remove(arg_var);
+                                all_free.extend(cond_free);
+                            }
+                        }
+                        MatchCase::CatchAllCase { var_name, when_cond, body, .. } => {
+                            let mut case_free = body.free_vars();
+                            case_free.remove(var_name);
+                            all_free.extend(case_free);
+                            if let Some(cond) = when_cond {
+                                let mut cond_free = cond.free_vars();
+                                cond_free.remove(var_name);
+                                all_free.extend(cond_free);
+                            }
+                        }
+                    }
+                }
+                all_free
+            }
+
+            Expr::IfThenElse { cond, then_expr, else_expr, .. } => {
+                &(&cond.free_vars() | &then_expr.free_vars()) | &else_expr.free_vars()
+            }
+
+            Expr::Int(_, _) => HashSet::new(),
+
+            Expr::Tuple(exprs, _) => {
+                let mut all_free = HashSet::new();
+                for expr in exprs {
+                    all_free.extend(expr.free_vars());
+                }
+                all_free
+            }
+
+            Expr::LetTuple { component_vars, bind_to, body, .. } => {
+                let bound_names: HashSet<String> = component_vars.iter().cloned().collect();
+                let mut body_free = body.free_vars();
+                for name in &bound_names {
+                    body_free.remove(name);
+                }
+                bind_to.free_vars().union(&body_free).cloned().collect()
+            }
+
+            Expr::RefConstructor { init, .. } => init.free_vars(),
+
+            Expr::Deref { ref_expr, .. } => ref_expr.free_vars(),
+
+            Expr::Assign { ref_expr, new_val, .. } => {
+                ref_expr.free_vars().union(&new_val.free_vars()).cloned().collect()
+            }
+
+            Expr::Sequence { first, second, .. } => {
+                first.free_vars().union(&second.free_vars()).cloned().collect()
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
