@@ -301,27 +301,18 @@ pub fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone 
             paren_expr,
         ));
         
-        // Function application: (expr exprlist)
+        // Curried function application: f x y z (space-separated)
         let application = atom.clone()
-            .then(
-                just(Token::LParen)
-                    .ignore_then(expr.clone().separated_by(just(Token::Comma)))
-                    .then_ignore(just(Token::RParen))
-                    .or_not()
-            )
+            .then(atom.clone().repeated().boxed())
             .map(|(fn_expr, args)| {
-                if let Some(args) = args {
-                    if !args.is_empty() {
-                        Expr::Application {
-                            fn_expr: Box::new(fn_expr),
-                            args,
-                            range: Range::dummy(),
-                        }
-                    } else {
-                        fn_expr
-                    }
-                } else {
+                if args.is_empty() {
                     fn_expr
+                } else {
+                    Expr::Application {
+                        fn_expr: Box::new(fn_expr),
+                        args,
+                        range: Range::dummy(),
+                    }
                 }
             });
         
@@ -559,7 +550,7 @@ mod tests {
 
     #[test]
     fn test_parse_let_rec() {
-        let result = parse_expr("let rec f : int -> int = fun (x : int) -> x + 1 in f(5)");
+        let result = parse_expr("let rec f : int -> int = fun (x : int) -> x + 1 in f 5");
         assert!(result.is_ok());
         match result.unwrap() {
             Expr::LetRec { bindings, .. } => assert_eq!(bindings.len(), 1),
@@ -715,7 +706,7 @@ mod tests {
 
     #[test]
     fn test_parse_function_application() {
-        let result = parse_expr("f(1, 2)");
+        let result = parse_expr("f 1 2");
         assert!(result.is_ok());
         match result.unwrap() {
             Expr::Application { args, .. } => assert_eq!(args.len(), 2),
@@ -725,7 +716,7 @@ mod tests {
 
     #[test]
     fn test_parse_complex_expr() {
-        let result = parse_expr("let f = fun (x : int) -> x * 2 in f(21)");
+        let result = parse_expr("let f = fun (x : int) -> x * 2 in f 21");
         assert!(result.is_ok());
     }
 

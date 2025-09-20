@@ -62,6 +62,27 @@ impl Ty {
             _ => false,
         }
     }
+
+    /// Returns a list of the types of a function type's domain
+    pub fn dom_ty_list(&self) -> Vec<Ty> {
+        match self {
+            Ty::FunTy { dom, cod, .. } => {
+                let mut result = vec![dom.as_ref().clone()];
+                result.extend(cod.dom_ty_list());
+                result
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Apply n arguments to a function type, returning the result type
+    pub fn apply(&self, n: usize) -> Ty {
+        match (n, self) {
+            (0, _) => self.clone(),
+            (_, Ty::FunTy { cod, .. }) => cod.apply(n - 1),
+            _ => panic!("applied function type to too many args"),
+        }
+    }
 }
 
 impl fmt::Display for Ty {

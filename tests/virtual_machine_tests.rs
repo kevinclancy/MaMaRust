@@ -35,7 +35,7 @@ fn sum_two_ints() {
 
 #[test]
 fn test_apply() {
-    run_test_expr("(fun (x : int) (y : int) -> x + y) 3 2", 5);
+    run_test_expr("(fun (x : int, y : int) -> x + y) 3 2", 5);
 }
 
 #[test]

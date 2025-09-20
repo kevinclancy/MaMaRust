@@ -275,8 +275,8 @@ pub fn code_v(
         },
         Expr::FunAbstraction { formals, body, range } => {
             let free_var_list : Vec<String> = expr.free_vars().iter().cloned().collect();
-            let global_vars : Vec<(Ty, i32)> = free_var_list.iter().map(
-                |var| get_var(ctxt, var, range, stack_level + 1)
+            let global_vars : Vec<(Ty, i32)> = free_var_list.iter().enumerate().map(
+                |(i, var)| get_var(ctxt, var, range, stack_level + i as i16)
             ).collect::<Result<Vec<_>, _>>()?;
             let push_globals : Vector<i32> = global_vars.iter().map(|(_, instr)| *instr).collect();
             let execute_body_addr = addr_gen.fresh_addr();
@@ -298,7 +298,7 @@ pub fn code_v(
                 body_ctxt.var_ctxt = body_ctxt.var_ctxt.update(var_name.clone(), var_entry);
             }
 
-            let (body_ty, body_code) = code_v(&body_ctxt, addr_gen, body, formals.len() as i16)?;
+            let (body_ty, body_code) = code_v(&body_ctxt, addr_gen, body, 0)?;
 
             let fun_ty = formals.iter().rev().fold(body_ty, |acc, formal| {
                 Ty::FunTy {
@@ -313,7 +313,7 @@ pub fn code_v(
                     push_globals +
                     vector![
                         instr::mk_vec(global_vars.len() as u16),
-                        instr::mk_clos(execute_body_addr),
+                        instr::mk_fun_val(execute_body_addr),
                         instr::jump(after_addr),
                         instr::symbolic_addr(execute_body_addr),
                         instr::targ(formals.len() as u8)
@@ -321,11 +321,68 @@ pub fn code_v(
                     body_code +
                     vector![
                         instr::return_(formals.len() as u8),
-                        instr::update(),
                         instr::symbolic_addr(after_addr)
                     ]
                 )
             ))
+        },
+        Expr::Application { fn_expr, args, .. } => {
+            let num_admin_elems = match ctxt.tail_pos { Some(_) => 0i16, None => 1i16 };
+            let (ty_fun, code_fun) =
+                code_v(ctxt, addr_gen, fn_expr, stack_level + (args.len() as i16) + num_admin_elems)?;
+            let ty_code_args: Vec<(Ty, Vector<i32>)> = args.iter().enumerate().map(
+                |(i, e)|
+                    code_v(
+                        &Context { tail_pos: None, ..ctxt.clone() },
+                        addr_gen,
+                        e,
+                        stack_level + ((args.len() - i - 1) as i16) + num_admin_elems
+                    )
+            ).collect::<Result<Vec<_>, _>>()?;
+            let formal_tys = ty_fun.dom_ty_list();
+            if formal_tys.len() < ty_code_args.len() {
+                return Err(("expected applied expression to have function type".to_string(), *fn_expr.range()))
+            }
+            let used_formal_tys : Vec<Ty> = formal_tys.iter().take(ty_code_args.len()).cloned().collect();
+            for i in 0..ty_code_args.len() {
+                let (actual_ty, _) = &ty_code_args[i];
+                let formal_ty = &used_formal_tys[i];
+                if !Ty::is_equal(actual_ty, formal_ty) {
+                    return Err(("argument type mismatch".to_string(), *args[i].range()));
+                }
+            }
+            let arg_codes: Vector<i32> = ty_code_args.iter().fold(Vector::new(), |acc, (_, code)| acc + code.clone());
+            let result_ty = formal_tys.iter().skip(ty_code_args.len()).fold(
+                ty_fun.apply(ty_code_args.len()),
+                |acc, formal_ty| Ty::FunTy {
+                    dom: Box::new(formal_ty.clone()),
+                    cod: Box::new(acc),
+                    range: Range::dummy()
+                }
+            );
+            match ctxt.tail_pos {
+                Some(num_formals) if ty_code_args.len() == num_formals as usize => {
+                    Ok((
+                        result_ty,
+                        arg_codes + code_fun + vector![instr::slide(ty_code_args.len() as u8, 1), instr::apply()]
+                    ))
+                },
+                _ => {
+                    let after_addr = addr_gen.fresh_addr();
+                    Ok((
+                        result_ty,
+                        (
+                            vector![instr::mark(after_addr)] +
+                            arg_codes +
+                            code_fun +
+                            vector![
+                                instr::apply(),
+                                instr::symbolic_addr(after_addr)
+                            ]
+                        )
+                    ))
+                }
+            }
         },
         Expr::Let{ bound_var, bind_to, body, .. } => {
             let (ty_bound, code_bound) = code_v(ctxt, addr_gen, bind_to, stack_level)?;
