@@ -351,26 +351,21 @@ pub fn code_v(
                     return Err(("argument type mismatch".to_string(), *args[i].range()));
                 }
             }
-            let arg_codes: Vector<i32> = ty_code_args.iter().fold(Vector::new(), |acc, (_, code)| acc + code.clone());
-            let result_ty = formal_tys.iter().skip(ty_code_args.len()).fold(
-                ty_fun.apply(ty_code_args.len()),
-                |acc, formal_ty| Ty::FunTy {
-                    dom: Box::new(formal_ty.clone()),
-                    cod: Box::new(acc),
-                    range: Range::dummy()
-                }
+            let arg_codes: Vector<i32> = ty_code_args.iter().rev().fold(
+                Vector::new(),
+                |acc, (_, code)| acc + code.clone()
             );
             match ctxt.tail_pos {
                 Some(num_formals) if ty_code_args.len() == num_formals as usize => {
                     Ok((
-                        result_ty,
+                        ty_fun.apply(ty_code_args.len()),
                         arg_codes + code_fun + vector![instr::slide(ty_code_args.len() as u8, 1), instr::apply()]
                     ))
                 },
                 _ => {
                     let after_addr = addr_gen.fresh_addr();
                     Ok((
-                        result_ty,
+                        ty_fun.apply(ty_code_args.len()),
                         (
                             vector![instr::mark(after_addr)] +
                             arg_codes +

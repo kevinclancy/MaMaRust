@@ -90,6 +90,36 @@ fn test_nested_arithmetic() {
 }
 
 #[test]
+fn test_multi_call() {
+    run_test_expr("let a = fun (x : int, y : int) -> x + y in a (3 + 2) 1", 6);
+}
+
+#[test]
+fn test_two_calls() {
+    run_test_expr("let a = fun (x : int, y : int) -> x + y in (a 3 2) + (a 1 4)", 10);
+}
+
+#[test]
+fn test_under_supply() {
+    run_test_expr("let a = fun (x : int, y : int) -> x + y in let b = a 3 in b 2", 5);
+}
+
+#[test]
+fn test_over_supply() {
+    run_test_expr("let a = fun (x : int) -> fun (y : int) -> x + y in a 3 2", 5);
+}
+
+#[test]
+fn test_call_arg() {
+    run_test_expr("let a = fun (x : int, y : int) -> x + y in a (a 3 2) 1", 6);
+}
+
+#[test]
+fn test_call_arg2() {
+    run_test_expr("let a = fun (x : int, y : int) -> x + y in a 1 (a 3 2)", 6);
+}
+
+#[test]
 #[ignore = "Requires tuple implementation"]
 fn test_tuple() {
     run_test_expr("let (x, y) = (3, 4) in x + y", 7);
@@ -116,5 +146,5 @@ fn test_match() {
 #[test]
 #[ignore = "Requires recursive function implementation"]
 fn test_factorial() {
-    run_test_expr("let rec fact = fun (n : int) -> if n <= 1 then 1 else n * (fact (n - 1)) in fact 5", 120);
+    run_test_expr("let rec fact = fun (n : int) -> if n <= 1 then 1 else n * (fact (n - 1)) in fact 4", 24);
 }
