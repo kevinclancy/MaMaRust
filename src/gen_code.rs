@@ -35,7 +35,7 @@ pub struct Context {
     pub var_ctxt: HashMap<String, VarContextEntry>,
     pub ty_ctxt: HashMap<String, Ty>,
     pub constructor_ctxt: HashMap<String, Ty>,
-    pub tail_pos: Option<i32>,
+    pub tail_pos: Option<u8>,
 }
 
 impl Context {
@@ -53,13 +53,13 @@ pub fn get_var(
     ctxt: &Context,
     var_name: &str,
     var_rng: &Range,
-    stack_level: i16,
+    stack_level: u8,
 ) -> Result<(Ty, i32), (String, Range)> {
     match ctxt.var_ctxt.get(var_name) {
         Some(VarContextEntry{ address: Address::Local(i), ty }) => {
             Ok((
                 ty.clone(),
-                instr::push_loc(stack_level - i)
+                instr::push_loc(stack_level as i16 - i)
             ))
         },
         Some(VarContextEntry{ address: Address::Global(i), ty }) => {
@@ -83,10 +83,11 @@ pub fn bin_op_b(
     e1: &Expr,
     e2: &Expr,
     instr: i32,
-    stack_level: i16,
+    stack_level: u8,
 ) -> Result<(Ty, Vector<i32>), (String, Range)> {
-    let (ty1, code1) = code_b(ctxt, addr_gen, e1, stack_level)?;
-    let (ty2, code2) = code_b(ctxt, addr_gen, e2, stack_level)?;
+    let ctxt_prime = Context { tail_pos: None, ..ctxt.clone() };
+    let (ty1, code1) = code_b(&ctxt_prime, addr_gen, e1, stack_level)?;
+    let (ty2, code2) = code_b(&ctxt_prime, addr_gen, e2, stack_level)?;
     match ty1 {
         Ty::IntTy(_) => { },
         _ => { return Err(("Expected lhs to have type 'int'".to_string(), *e1.range())); }
@@ -107,7 +108,7 @@ pub fn bin_op_v(
     e1: &Expr,
     e2: &Expr,
     instr: i32,
-    stack_level: i16,
+    stack_level: u8,
 ) -> Result<(Ty, Vector<i32>), (String, Range)> {
     let (ty, code) = bin_op_b(ctxt, addr_gen, e1, e2, instr, stack_level)?;
     Ok((
@@ -120,7 +121,7 @@ pub fn code_c(
     ctxt: &Context,
     addr_gen: &mut AddressGenerator,
     expr: &Expr,
-    stack_level: i16,
+    stack_level: u8,
 ) -> Result<(Ty, Vector<i32>), String> {
     panic!("code_c not implemented")
 }
@@ -129,7 +130,7 @@ pub fn code_b(
     ctxt: &Context,
     addr_gen: &mut AddressGenerator,
     expr: &Expr,
-    stack_level: i16,
+    stack_level: u8,
 ) -> Result<(Ty, Vector<i32>), (String, Range)> {
     match expr {
         Expr::Int(n, _) => {
@@ -209,7 +210,7 @@ pub fn code_v(
     ctxt: &Context,
     addr_gen: &mut AddressGenerator,
     expr: &Expr,
-    stack_level: i16,
+    stack_level: u8,
 ) -> Result<(Ty, Vector<i32>), (String, Range)> {
     match expr {
         Expr::Int(n, _) => {
@@ -276,7 +277,7 @@ pub fn code_v(
         Expr::FunAbstraction { formals, body, range } => {
             let free_var_list : Vec<String> = expr.free_vars().iter().cloned().collect();
             let global_vars : Vec<(Ty, i32)> = free_var_list.iter().enumerate().map(
-                |(i, var)| get_var(ctxt, var, range, stack_level + i as i16)
+                |(i, var)| get_var(ctxt, var, range, stack_level + (i as u8))
             ).collect::<Result<Vec<_>, _>>()?;
             let push_globals : Vector<i32> = global_vars.iter().map(|(_, instr)| *instr).collect();
             let execute_body_addr = addr_gen.fresh_addr();
@@ -297,8 +298,8 @@ pub fn code_v(
                 };
                 body_ctxt.var_ctxt = body_ctxt.var_ctxt.update(var_name.clone(), var_entry);
             }
-
-            let (body_ty, body_code) = code_v(&body_ctxt, addr_gen, body, 0)?;
+            let body_ctxt = &Context{ tail_pos: Some(formals.len() as u8), ..body_ctxt };
+            let (body_ty, body_code) = code_v(body_ctxt, addr_gen, body, 0)?;
 
             let fun_ty = formals.iter().rev().fold(body_ty, |acc, formal| {
                 Ty::FunTy {
@@ -327,16 +328,16 @@ pub fn code_v(
             ))
         },
         Expr::Application { fn_expr, args, .. } => {
-            let num_admin_elems = match ctxt.tail_pos { Some(_) => 0i16, None => 1i16 };
+            let num_admin_elems = match ctxt.tail_pos { Some(_) => 0u8, None => 1u8 };
             let (ty_fun, code_fun) =
-                code_v(ctxt, addr_gen, fn_expr, stack_level + (args.len() as i16) + num_admin_elems)?;
+                code_v(ctxt, addr_gen, fn_expr, stack_level + (args.len() as u8) + num_admin_elems)?;
             let ty_code_args: Vec<(Ty, Vector<i32>)> = args.iter().enumerate().map(
                 |(i, e)|
                     code_v(
                         &Context { tail_pos: None, ..ctxt.clone() },
                         addr_gen,
                         e,
-                        stack_level + ((args.len() - i - 1) as i16) + num_admin_elems
+                        stack_level + ((args.len() - i - 1) as u8) + num_admin_elems
                     )
             ).collect::<Result<Vec<_>, _>>()?;
             let formal_tys = ty_fun.dom_ty_list();
@@ -358,14 +359,21 @@ pub fn code_v(
             match ctxt.tail_pos {
                 Some(num_formals) if ty_code_args.len() == num_formals as usize => {
                     Ok((
-                        ty_fun.apply(ty_code_args.len()),
-                        arg_codes + code_fun + vector![instr::slide(ty_code_args.len() as u8, 1), instr::apply()]
+                        ty_fun.apply(args.len()),
+                        (
+                            arg_codes +
+                            code_fun +
+                            vector![
+                                instr::slide(stack_level + num_formals, args.len() as u8 + 1),
+                                instr::apply()
+                            ]
+                        )
                     ))
                 },
                 _ => {
                     let after_addr = addr_gen.fresh_addr();
                     Ok((
-                        ty_fun.apply(ty_code_args.len()),
+                        ty_fun.apply(args.len()),
                         (
                             vector![instr::mark(after_addr)] +
                             arg_codes +
@@ -381,7 +389,7 @@ pub fn code_v(
         },
         Expr::Let{ bound_var, bind_to, body, .. } => {
             let (ty_bound, code_bound) = code_v(ctxt, addr_gen, bind_to, stack_level)?;
-            let var_entry = VarContextEntry { address: Address::Local(stack_level + 1), ty: ty_bound };
+            let var_entry = VarContextEntry { address: Address::Local(stack_level as i16 + 1), ty: ty_bound };
             let ctxt_2 = Context { var_ctxt: ctxt.var_ctxt.update(bound_var.clone(), var_entry), ..ctxt.clone() };
             let (ty_body, code_body) = code_v(&ctxt_2, addr_gen, body, stack_level + 1)?;
             Ok((
@@ -394,6 +402,49 @@ pub fn code_v(
             Ok((
                 ty,
                 vector![push_var_instr, instr::eval()]
+            ))
+        },
+        Expr::LetRec { bindings, body, .. } => {
+            let n = bindings.len();
+            let ctxt_prime = bindings.iter().enumerate().fold(ctxt.clone(), |acc_ctxt, (i, (name, ty, _))| {
+                let var_entry = VarContextEntry {
+                    address: Address::Local(stack_level as i16 + (i as i16) + 1),
+                    ty: ty.clone()
+                };
+                Context {
+                    var_ctxt: acc_ctxt.var_ctxt.update(name.clone(), var_entry),
+                    ..acc_ctxt
+                }
+            });
+            let binding_codes: Vec<(Ty, Vector<i32>)> = bindings.iter()
+                .map(|(_, ascribed_ty, bound_expr)| {
+                    let (synthesized_ty, bound_code) = code_v(
+                        &Context { tail_pos: None, ..ctxt_prime.clone() },
+                        addr_gen,
+                        bound_expr,
+                        stack_level + (n as u8)
+                    )?;
+
+                    if !Ty::is_equal(&synthesized_ty, ascribed_ty) {
+                        return Err((
+                            format!("ascribed type does not match synthesized type"),
+                            *bound_expr.range()
+                        ));
+                    }
+
+                    Ok((synthesized_ty, bound_code))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let (body_ty, body_code) = code_v(&ctxt_prime, addr_gen, body, stack_level + (n as u8))?;
+            let rewrite_blocks = binding_codes.iter().enumerate()
+                .rev()
+                .fold(Vector::new(), |acc, (i, (_, bound_code))| {
+                    let rewrite_idx = (i + 1) as u8;
+                    acc + bound_code.clone() + vector![instr::rewrite(rewrite_idx)]
+                });
+            Ok((
+                body_ty,
+                vector![instr::alloc(n as u8)] + rewrite_blocks + body_code + vector![instr::slide(n as u8, 1)]
             ))
         },
         _ => panic!("not implemented")

@@ -10,7 +10,7 @@ fn run_test_expr(expr_str: &str, expected_result: i32) {
     let mut context = Context::new();
     let mut addr_generator = AddressGenerator::new();
 
-    let (ty, code) = code_v(&mut context, &mut addr_generator, &e, 0i16).unwrap();
+    let (ty, code) = code_v(&mut context, &mut addr_generator, &e, 0u8).unwrap();
 
     match ty {
         Ty::IntTy(_) => {},
@@ -140,11 +140,110 @@ fn test_assign() {
 #[test]
 #[ignore = "Requires pattern matching implementation"]
 fn test_match() {
-    panic!("Pattern matching tests require type definitions");
+    run_test_expr("match Some 5 with | Some x -> x | None -> 0", 5);
 }
 
 #[test]
-#[ignore = "Requires recursive function implementation"]
 fn test_factorial() {
-    run_test_expr("let rec fact = fun (n : int) -> if n <= 1 then 1 else n * (fact (n - 1)) in fact 4", 24);
+    run_test_expr("let rec fact : int -> int = fun (n : int) -> if n <= 1 then 1 else n * (fact (n - 1)) in fact 4", 24);
+}
+
+#[test]
+#[ignore = "Requires tuple implementation"]
+fn test_empty_tuple() {
+    run_test_expr("let () = () in 1", 1);
+}
+
+#[test]
+#[ignore = "Requires tuple implementation"]
+fn test_fact_tuple() {
+    run_test_expr("let rec fact : int -> int = fun (n : int) -> if n <= 1 then 1 else n * (fact (n - 1)) in let (x, y) = (fact 3, fact 4) in x + y", 30);
+}
+
+#[test]
+#[ignore = "Requires reference assignment implementation"]
+fn test_assign_add() {
+    run_test_expr("let a = ref 0 in a := !a + 2; !a", 2);
+}
+
+#[test]
+#[ignore = "Requires pattern matching implementation"]
+fn test_match2() {
+    run_test_expr("match Some 42 with | Some x -> x | None -> 0", 42);
+}
+
+#[test]
+#[ignore = "Requires pattern matching implementation"]
+fn test_match3() {
+    run_test_expr("match (1, 2) with | (x, y) -> x + y", 3);
+}
+
+#[test]
+#[ignore = "Requires pattern matching implementation"]
+fn test_match_guard_false() {
+    run_test_expr("match 5 with | x when x > 10 -> 1 | _ -> 0", 0);
+}
+
+#[test]
+#[ignore = "Requires pattern matching implementation"]
+fn test_match_guard_true() {
+    run_test_expr("match 15 with | x when x > 10 -> 1 | _ -> 0", 1);
+}
+
+#[test]
+#[ignore = "Requires pattern matching implementation"]
+fn test_match_fall_through() {
+    run_test_expr("match 2 with | 1 -> 10 | 2 -> 20 | _ -> 30", 20);
+}
+
+#[test]
+#[ignore = "Requires pattern matching implementation"]
+fn test_match_catch_all_guard() {
+    run_test_expr("match 5 with | x when x > 10 -> 1 | _ -> 0", 0);
+}
+
+#[test]
+#[ignore = "Requires reference implementation"]
+fn cbv_application() {
+    run_test_expr("let z = ref 0 in let a = fun (x : int, y : int) -> !z + x + y in z := !z + 1; a (z := !z + 1; 1) (z := !z + 1; 1)", 5);
+}
+
+#[test]
+#[ignore = "Requires constructor implementation"]
+fn cbv_constructor() {
+    run_test_expr("let z = ref 0 in z := !z + 1; (Some (!z))", 1);
+}
+
+#[test]
+#[ignore = "Requires tuple implementation"]
+fn cbv_tuples() {
+    run_test_expr("let z = ref 0 in z := !z + 1; (!z, !z)", 1);
+}
+
+#[test]
+#[ignore = "Requires reference implementation"]
+fn cbv_let() {
+    run_test_expr("let z = ref 3 in let x = (z := !z + 1; !z) in x", 4);
+}
+
+#[test]
+fn tail_lite() {
+    run_test_expr("let rec foo : int -> int = fun (z : int) -> if z == 5 then 1 else foo (z + 1) in foo 0", 1);
+}
+
+#[test]
+fn tail_call() {
+    run_test_expr("let rec foo : int -> int = fun (z : int) -> if z == 300000 then 1 else foo (z + 1) in foo 0", 1);
+}
+
+#[test]
+#[ignore = "Requires reference implementation"]
+fn test_dont_collect_gp() {
+    run_test_expr("let mkIncrementer = fun () -> let rec foo : int -> int = fun (z : int) -> if z == 100000 then 1 else foo (z + 1) in fun () -> foo 0 in (mkIncrementer ()) ()", 1);
+}
+
+#[test]
+#[ignore = "Requires reference implementation"]
+fn test_dont_collect_gp2() {
+    run_test_expr("let mkFoo = fun () -> let z = ref 0 in let rec foo : int -> int = fun (x : int) -> if x == 100000 then (z := !z + 1; !z) else foo (x + 1) in foo in (mkFoo ()) 0", 1);
 }
