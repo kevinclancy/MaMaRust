@@ -447,6 +447,95 @@ pub fn code_v(
                 vector![instr::alloc(n as u8)] + rewrite_blocks + body_code + vector![instr::slide(n as u8, 1)]
             ))
         },
-        _ => panic!("not implemented")
+        Expr::RefConstructor { init, .. } => {
+            let (init_ty, init_code) = code_v(
+                &Context { tail_pos: None, ..ctxt.clone() },
+                addr_gen,
+                init,
+                stack_level
+            )?;
+            Ok((
+                Ty::RefTy { contained_ty: Box::new(init_ty), range: Range::dummy() },
+                init_code + vector![instr::mk_ref()]
+            ))
+        },
+        Expr::Deref { ref_expr, range } => {
+            let (ref_expr_ty, ref_expr_code) = code_v(
+                &Context { tail_pos: None, ..ctxt.clone() },
+                addr_gen,
+                ref_expr,
+                stack_level
+            )?;
+            let elem_ty = match ref_expr_ty {
+                Ty::RefTy { contained_ty, .. } => *contained_ty,
+                _ => {
+                    return Err((
+                        format!("Expected {:?} to have a reference type but instead found {}", ref_expr, ref_expr_ty),
+                        *range
+                    ));
+                }
+            };
+            Ok((
+                elem_ty,
+                ref_expr_code + vector![instr::get_ref()]
+            ))
+        },
+        Expr::Assign { ref_expr, new_val, range } => {
+            let (new_val_ty, new_val_code) = code_v(
+                &Context { tail_pos: None, ..ctxt.clone() },
+                addr_gen,
+                new_val,
+                stack_level
+            )?;
+            let (ref_expr_ty, ref_expr_code) = code_v(
+                &Context { tail_pos: None, ..ctxt.clone() },
+                addr_gen,
+                ref_expr,
+                stack_level + 1
+            )?;
+            match &ref_expr_ty {
+                Ty::RefTy { contained_ty, .. } => {
+                    if !Ty::is_equal(&*contained_ty, &new_val_ty) {
+                        return Err((
+                            format!("expected lhs to have type Ref {} but instead had type {}", new_val_ty, ref_expr_ty),
+                            *range
+                        ));
+                    }
+                },
+                _ => {
+                    return Err((
+                        format!("expected lhs to have reference type but instead had type {}", ref_expr_ty),
+                        *range
+                    ));
+                }
+            }
+            Ok((
+                Ty::ProdTy{ components: vec![], range: Range::dummy() },
+                new_val_code + ref_expr_code + vector![instr::ref_assign()]
+            ))
+        },
+        Expr::Sequence { first, second, .. } => {
+            let (first_ty, first_code) = code_v(
+                &Context { tail_pos: None, ..ctxt.clone() },
+                addr_gen,
+                first,
+                stack_level
+            )?;
+            let (second_ty, second_code) = code_v(ctxt, addr_gen, second, stack_level)?;
+            match first_ty {
+                Ty::ProdTy { components, .. } if components.is_empty() => {},
+                _ => {
+                    return Err((
+                        "expected first expression to have unit type".to_string(),
+                        *first.range()
+                    ));
+                }
+            }
+            Ok((
+                second_ty,
+                first_code + vector![instr::pop()] + second_code
+            ))
+        },
+        _ => panic!("{:?} not implemented", expr)
     }
 }

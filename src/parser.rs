@@ -257,12 +257,6 @@ pub fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone 
                 range: Range::dummy(),
             });
         
-        let deref = just(Token::Bang)
-            .ignore_then(expr.clone())
-            .map(|ref_expr| Expr::Deref {
-                ref_expr: Box::new(ref_expr),
-                range: Range::dummy(),
-            });
         
         // Constructor application: (Constructor expr)
         let constructor_app = just(Token::LParen)
@@ -296,7 +290,6 @@ pub fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone 
             if_then_else,
             match_expr,
             ref_constructor,
-            deref,
             constructor_app,
             paren_expr,
         ));
@@ -316,24 +309,20 @@ pub fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone 
                 }
             });
         
-        // Assignment: expr := expr
-        let assignment = application.clone()
-            .then(just(Token::Assign).ignore_then(application.clone()).or_not())
-            .map(|(ref_expr, new_val)| {
-                if let Some(new_val) = new_val {
-                    Expr::Assign {
-                        ref_expr: Box::new(ref_expr),
-                        new_val: Box::new(new_val),
-                        range: Range::dummy(),
-                    }
-                } else {
-                    ref_expr
-                }
-            });
+        // Unary operations: !expr
+        let unary = choice((
+            just(Token::Bang)
+                .ignore_then(application.clone())
+                .map(|ref_expr| Expr::Deref {
+                    ref_expr: Box::new(ref_expr),
+                    range: Range::dummy(),
+                }),
+            application.clone(),
+        ));
         
         // Multiplicative operations
-        let factor = assignment.clone()
-            .then(just(Token::Times).ignore_then(assignment.clone()).repeated())
+        let factor = unary.clone()
+            .then(just(Token::Times).ignore_then(unary.clone()).repeated())
             .foldl(|lhs, rhs| Expr::Times(Box::new(lhs), Box::new(rhs), Range::dummy()));
         
         // Additive operations
@@ -374,9 +363,26 @@ pub fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone 
                 }
             });
         
+        // Assignment: expr := expr (right-associative, lowest precedence)
+        let assignment = recursive(|assignment| {
+            comparison.clone()
+                .then(just(Token::Assign).ignore_then(assignment.clone()).or_not())
+                .map(|(ref_expr, new_val)| {
+                    if let Some(new_val) = new_val {
+                        Expr::Assign {
+                            ref_expr: Box::new(ref_expr),
+                            new_val: Box::new(new_val),
+                            range: Range::dummy(),
+                        }
+                    } else {
+                        ref_expr
+                    }
+                })
+        });
+        
         // Sequence: expr ; expr
-        let sequence = comparison.clone()
-            .then(just(Token::Semicolon).ignore_then(comparison.clone()).repeated())
+        let sequence = assignment.clone()
+            .then(just(Token::Semicolon).ignore_then(assignment.clone()).repeated())
             .foldl(|first, second| Expr::Sequence {
                 first: Box::new(first),
                 second: Box::new(second),
@@ -816,4 +822,5 @@ mod tests {
         let result = parse_expr(input);
         assert!(result.is_ok());
     }
+
 }
