@@ -1,6 +1,9 @@
 use crate::heap::{Heap};
 use crate::virtual_machine::{VirtualMachine, CodeAddr};
 
+/// Pop all of the values from the shadow stack pointer (inclusive) to direcly above
+/// the frame pointer, moving them into a newly allocated vector object `v`, pushing a
+/// reference to `v` onto the shadow stack.
 fn mkvec0(vm : &mut VirtualMachine, heap: &mut Heap) {
   let n = vm.ssp - vm.fp;
   let mut vec = vec![0; n];
@@ -13,11 +16,20 @@ fn mkvec0(vm : &mut VirtualMachine, heap: &mut Heap) {
   vm.ss[vm.ssp] = vec_addr;
 }
 
+/// Allocate a new function-object, using the current PC for its code address, the reference on top of
+/// the shadow stack as its argument vector address, and the current GP as its global vector address.
+///
+/// Then push the new function-object onto the shadow stack.
 fn wrap(vm: &mut VirtualMachine, heap: &mut Heap) {
   let fun_addr = heap.new_function(vm.pc, vm.ss[vm.ssp], vm.gp, vm.roots());
   vm.ss[vm.ssp] = fun_addr;
 }
 
+/// Restore the global pointer from the current frame's saved GP (at the shadow stack location pointed to by FP).
+/// The value at the top of the shadow stack is preserved by sliding it down to FP, discarding everything
+/// in between (let-bound values, arguments). FP then refers to the new top of the shadow stack.
+///
+/// Pop a saved PC and FP from the top of the basic stack, restoring their values to the PC and FP registers.
 fn popenv(vm: &mut VirtualMachine) {
   vm.gp = vm.ss[vm.fp];
   vm.pc = vm.s[vm.sp];
@@ -27,6 +39,9 @@ fn popenv(vm: &mut VirtualMachine) {
   vm.sp -= 2;
 }
 
+/// Save the current GP onto the shadow stack and push the current FP and the given return address
+/// onto the basic stack, establishing a new call frame. FP is set to the new top of the shadow stack,
+/// which points to the saved GP.
 fn mark(vm: &mut VirtualMachine, return_addr: CodeAddr) {
   vm.ss[vm.ssp + 1] = vm.gp.try_into().unwrap();
   vm.s[vm.sp + 1] = vm.fp.try_into().unwrap();
@@ -36,6 +51,9 @@ fn mark(vm: &mut VirtualMachine, return_addr: CodeAddr) {
   vm.fp = vm.ssp;
 }
 
+/// Expect a function object at the top of the shadow stack. Replace it with the function's stored
+/// arguments (unpacked from its argument vector), set GP to the function's globals pointer,
+/// and jump to the function's code address.
 fn apply(vm: &mut VirtualMachine, heap: &Heap) {
   let (code_addr, args_addr, globals_addr) = heap.expect_function(vm.ss[vm.ssp]);
   let args = heap.expect_vector(args_addr);
@@ -47,6 +65,8 @@ fn apply(vm: &mut VirtualMachine, heap: &Heap) {
   vm.pc = code_addr;
 }
 
+/// Expect a closure at the top of the shadow stack. Pop it, set GP to the closure's globals
+/// pointer, and jump to the closure's code address.
 fn apply0(vm: &mut VirtualMachine, heap: &Heap) {
   let (code_addr, globals_addr) = heap.expect_closure(vm.ss[vm.ssp]);
   vm.gp = globals_addr;
@@ -54,6 +74,8 @@ fn apply0(vm: &mut VirtualMachine, heap: &Heap) {
   vm.ssp -= 1;
 }
 
+/// Remove `slide_distance` elements from the shadow stack by sliding the top `num_elems_to_slide`
+/// elements downward, overwriting the elements beneath them.
 fn slide(vm: &mut VirtualMachine, slide_distance: usize, num_elems_to_slide: usize) {
   match slide_distance {
     0 => { },
@@ -71,18 +93,23 @@ fn slide(vm: &mut VirtualMachine, slide_distance: usize, num_elems_to_slide: usi
   }
 }
 
+/// Overwrite the heap object referenced `n` positions below the top of the shadow stack
+/// with the heap object referenced at the top of the shadow stack. Used to fill in
+/// placeholder closures allocated by ALLOC with their actual values.
 fn rewrite(vm: &mut VirtualMachine, heap:&mut Heap, n: i32) {
   let n : usize = n.try_into().unwrap();
-  heap.rewrite(vm.ss[vm.ssp - n],vm.ss[vm.ssp]);
+  heap.rewrite(vm.ss[vm.ssp], vm.ss[vm.ssp - n]);
   vm.sp -= 1;
 }
 
+/// Push a copy of the shadow stack value `n` positions below the top onto the shadow stack.
 fn pushloc(vm: &mut VirtualMachine, n: i32) {
   let n : usize = n.try_into().unwrap();
   vm.ss[vm.ssp + 1] = vm.ss[vm.ssp - n];
   vm.ssp += 1;
 }
 
+/// Execute the program, returning the result of the program.
 pub fn execute(vm: &mut VirtualMachine) -> i32 {
   let mut heap = Heap::create();
   loop {
