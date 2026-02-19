@@ -2,7 +2,9 @@ use crate::{code_builder::{add, get_basic, load_c, mk_basic, sub, symbolic_addr}
 use im::{HashMap, Vector, vector};
 use crate::code_builder as instr;
 
+/// An object that generates a sequence of unique symbolic addresses
 pub struct AddressGenerator {
+    /// The next address to generate
     next_addr: u16,
 }
 
@@ -11,6 +13,8 @@ impl AddressGenerator {
         AddressGenerator { next_addr: 0 }
     }
 
+    /// Returns a symbolic address that is unique from all other symbolic addresses that
+    /// have been returned by this `AddressGenerator`
     pub fn fresh_addr(&mut self) -> u16 {
         let addr = self.next_addr;
         self.next_addr += 1;
@@ -18,23 +22,37 @@ impl AddressGenerator {
     }
 }
 
+/// The physical location of a value
 #[derive(Debug, Clone)]
 pub enum Address {
+    /// `Local(n)` contains the address's offset from SP0 (the SP when the most recent function was called)
+    ///
+    /// Postive `n` is for let-bound values, with higher values of `n` for more recent bindings
+    ///
+    /// Non-positive `n` is for function call arguments; 0 is the leftmost-argument, 1 is the next argument, etc.
     Local(i16),
+    /// `Global(n)` locates the `n`th variable stored in global vector (0-indexed); this is used to store values
+    /// in a function's closure
     Global(u16),
 }
 
 #[derive(Debug, Clone)]
 pub struct VarContextEntry {
+    /// The address of the variable
     pub address: Address,
+    /// The type of the value bound to the variable
     pub ty: Ty,
 }
 
+/// Contextual information relevant to a position in source code.
+/// This includes types of bound variables and other things.
 #[derive(Debug, Clone)]
 pub struct Context {
+    /// Maps each variable name in context to its address and type
     pub var_ctxt: HashMap<String, VarContextEntry>,
     pub ty_ctxt: HashMap<String, Ty>,
     pub constructor_ctxt: HashMap<String, Ty>,
+    /// Some(n) if we're in tail position in an n-parameter function definition, None otherwise
     pub tail_pos: Option<u8>,
 }
 
@@ -49,6 +67,10 @@ impl Context {
     }
 }
 
+/// If the variable `var_name` is in context, return its type and an instruction
+/// that pushes the value it refers to onto the stack
+///
+/// If `var_name` is not in context, generate a type-checking error using the `Err` variant.
 pub fn get_var(
     ctxt: &Context,
     var_name: &str,
@@ -77,6 +99,11 @@ pub fn get_var(
     }
 }
 
+/// Generate code to push the value (NOT a heap reference) of `e1 instr_op e2` onto the stack,
+/// where `instr_op` is the operation performed by the instruction `instr`
+///
+/// If either `e1` or `e2` do not match the expected types of the arguments of `instr_op` then
+/// generate a type error.
 pub fn bin_op_b(
     ctxt: &Context,
     addr_gen: &mut AddressGenerator,
@@ -102,6 +129,13 @@ pub fn bin_op_b(
     ))
 }
 
+/// Letting `instr_op` by the operation performed by the instruction `instr`, generates code to:
+/// 1. Allocate a basic value on the heap,
+/// 2. Store the value of `e1 instr_op e2` in the basic value
+/// 3. Push a reference to the basic value onto the stack
+///
+/// If either `e1` or `e2` do not match the expected types of the arguments of `instr_op`, then
+/// generate a type error.
 pub fn bin_op_v(
     ctxt: &Context,
     addr_gen: &mut AddressGenerator,
@@ -117,6 +151,8 @@ pub fn bin_op_v(
     ))
 }
 
+/// Closure generation. This is not implemented for now, because our language is CBV. We will implement it later
+/// when we introduce controlled lazy evaluation ala OCaml.
 pub fn code_c(
     ctxt: &Context,
     addr_gen: &mut AddressGenerator,
@@ -126,6 +162,10 @@ pub fn code_c(
     panic!("code_c not implemented")
 }
 
+/// Assuming `expr` computes a basic value, generate code to push the value (NOT a heap reference)
+/// directly onto the stack
+///
+/// Returns a type error if `expr` is ill-typed
 pub fn code_b(
     ctxt: &Context,
     addr_gen: &mut AddressGenerator,
@@ -195,7 +235,8 @@ pub fn code_b(
                 )
             ))
         },
-        Expr::FunAbstraction{formals:_, body:_, range:_} => panic!("functions do not produce basic values"),
+        Expr::FunAbstraction{formals:_, body:_, range:_} =>
+            panic!("functions do not produce basic values"),
         _ => {
             let (ty, code) = code_v(ctxt, addr_gen, expr, stack_level)?;
             Ok((
@@ -206,6 +247,9 @@ pub fn code_b(
     }
 }
 
+/// Generate code to push the value denoted by the expression `expr` onto the stack.
+///
+/// If `expr` has a type error then report it using the `Err` variant
 pub fn code_v(
     ctxt: &Context,
     addr_gen: &mut AddressGenerator,
