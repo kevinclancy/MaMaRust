@@ -66,6 +66,7 @@ pub fn from_instructions(instructions: Vec<i32>) -> VirtualMachine {
 }
 
 impl VirtualMachine {
+  /// All the VM's current root addresses for garbage collection
   pub fn roots(&mut self) -> impl Iterator<Item = &mut HeapAddr> {
     self.ss[0..self.ssp+1].iter_mut().chain([&mut self.gp])
   }
