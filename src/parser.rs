@@ -130,6 +130,7 @@ pub fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone 
         let var = select! { Token::Id(name) => name }.map_with_span(|name, span| Expr::Var(name, span));
 
         // Function abstraction: (fun (param : type) -> expr)
+        // An empty formal list `fun () ->` desugars to a single unit-typed formal `_unit`
         let fun_abstraction = just(Token::Fun)
             .ignore_then(just(Token::LParen))
             .ignore_then(
@@ -142,10 +143,18 @@ pub fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone 
             .then_ignore(just(Token::RParen))
             .then_ignore(just(Token::To))
             .then(expr.clone())
-            .map_with_span(|(formals, body), span| Expr::FunAbstraction {
-                formals,
-                body: Box::new(body),
-                range: span,
+            .map_with_span(|(mut formals, body), span| {
+                if formals.is_empty() {
+                    formals.push(Formal {
+                        name: "_unit".to_string(),
+                        ty: Ty::ProdTy { components: vec![], range: 0..0 },
+                    });
+                }
+                Expr::FunAbstraction {
+                    formals,
+                    body: Box::new(body),
+                    range: span,
+                }
             });
 
         // Let expression: let x = expr in expr OR let (x,y,z) = expr in expr
@@ -159,11 +168,11 @@ pub fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone 
                     .then(expr.clone())
                     .then_ignore(just(Token::In))
                     .then(expr.clone())
-                    .map(|((component_vars, bind_to), body)| Expr::LetTuple {
+                    .map_with_span(|((component_vars, bind_to), body), span| Expr::LetTuple {
                         component_vars,
                         bind_to: Box::new(bind_to),
                         body: Box::new(body),
-                        range: 0..0,
+                        range: span,
                     }),
                 // Simple let: let x = expr in expr
                 select! { Token::Id(name) => name }
@@ -171,11 +180,11 @@ pub fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone 
                     .then(expr.clone())
                     .then_ignore(just(Token::In))
                     .then(expr.clone())
-                    .map(|((bound_var, bind_to), body)| Expr::Let {
+                    .map_with_span(|((bound_var, bind_to), body),span| Expr::Let {
                         bound_var,
                         bind_to: Box::new(bind_to),
                         body: Box::new(body),
-                        range: 0..0,
+                        range: span,
                     }),
             )))
             .map_with_span(|e, span| e.with_span(span));
