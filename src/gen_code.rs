@@ -1,4 +1,4 @@
-use crate::{code_builder::{add, get_basic, load_c, mk_basic, sub, symbolic_addr}, syntax::{Expr, Range, Ty}};
+use crate::{code_builder::{add, get_basic, load_c, mk_basic, sub, symbolic_addr}, syntax::{Expr, Span, Ty}};
 use im::{HashMap, Vector, vector};
 use crate::code_builder as instr;
 
@@ -74,9 +74,9 @@ impl Context {
 pub fn get_var(
     ctxt: &Context,
     var_name: &str,
-    var_rng: &Range,
+    var_rng: &Span,
     stack_level: u8,
-) -> Result<(Ty, i32), (String, Range)> {
+) -> Result<(Ty, i32), (String, Span)> {
     match ctxt.var_ctxt.get(var_name) {
         Some(VarContextEntry{ address: Address::Local(i), ty }) => {
             Ok((
@@ -111,20 +111,20 @@ pub fn bin_op_b(
     e2: &Expr,
     instr: i32,
     stack_level: u8,
-) -> Result<(Ty, Vector<i32>), (String, Range)> {
+) -> Result<(Ty, Vector<i32>), (String, Span)> {
     let ctxt_prime = Context { tail_pos: None, ..ctxt.clone() };
     let (ty1, code1) = code_b(&ctxt_prime, addr_gen, e1, stack_level)?;
     let (ty2, code2) = code_b(&ctxt_prime, addr_gen, e2, stack_level)?;
     match ty1 {
         Ty::IntTy(_) => { },
-        _ => { return Err(("Expected lhs to have type 'int'".to_string(), *e1.range())); }
+        _ => { return Err(("Expected lhs to have type 'int'".to_string(), e1.range().clone())); }
     };
     match ty2 {
         Ty::IntTy(_) => { },
-        _ => { return Err(("Expected rhs to have type 'int'".to_string(), *e2.range())); }
+        _ => { return Err(("Expected rhs to have type 'int'".to_string(), e2.range().clone())); }
     };
     Ok((
-        Ty::IntTy(Range::dummy()),
+        Ty::IntTy(0..0),
         code1 + code2 + vector![instr]
     ))
 }
@@ -143,7 +143,7 @@ pub fn bin_op_v(
     e2: &Expr,
     instr: i32,
     stack_level: u8,
-) -> Result<(Ty, Vector<i32>), (String, Range)> {
+) -> Result<(Ty, Vector<i32>), (String, Span)> {
     let (ty, code) = bin_op_b(ctxt, addr_gen, e1, e2, instr, stack_level)?;
     Ok((
         ty,
@@ -171,11 +171,11 @@ pub fn code_b(
     addr_gen: &mut AddressGenerator,
     expr: &Expr,
     stack_level: u8,
-) -> Result<(Ty, Vector<i32>), (String, Range)> {
+) -> Result<(Ty, Vector<i32>), (String, Span)> {
     match expr {
         Expr::Int(n, _) => {
             Ok((
-                Ty::IntTy(Range::dummy()),
+                Ty::IntTy(0..0),
                 vector![load_c(*n)]
             ))
         },
@@ -214,10 +214,10 @@ pub fn code_b(
             let (ty_else, code_else) = code_b(ctxt, addr_gen, else_expr, stack_level)?;
             match ty_cond {
                 Ty::IntTy(_) => { },
-                _ => { return Err(("expected condition to have type 'int'".to_string(), *cond.range())); }
+                _ => { return Err(("expected condition to have type 'int'".to_string(), cond.range().clone())); }
             }
             if !Ty::is_equal(&ty_then, &ty_else) {
-                return Err(("expected 'then' and 'else' branch to have equal types".to_string(), *expr.range()));
+                return Err(("expected 'then' and 'else' branch to have equal types".to_string(), expr.range().clone()));
             }
             let else_addr = addr_gen.fresh_addr();
             let after_addr = addr_gen.fresh_addr();
@@ -255,11 +255,11 @@ pub fn code_v(
     addr_gen: &mut AddressGenerator,
     expr: &Expr,
     stack_level: u8,
-) -> Result<(Ty, Vector<i32>), (String, Range)> {
+) -> Result<(Ty, Vector<i32>), (String, Span)> {
     match expr {
         Expr::Int(n, _) => {
             Ok((
-                Ty::IntTy(Range::dummy()),
+                Ty::IntTy(0..0),
                 vector![load_c(*n), mk_basic()]
             ))
         },
@@ -298,10 +298,10 @@ pub fn code_v(
             let (ty_else, code_else) = code_v(ctxt, addr_gen, else_expr, stack_level)?;
             match ty_cond {
                 Ty::IntTy(_) => { },
-                _ => { return Err(("expected condition to have type 'int'".to_string(), *cond.range())); }
+                _ => { return Err(("expected condition to have type 'int'".to_string(), cond.range().clone())); }
             }
             if !Ty::is_equal(&ty_then, &ty_else) {
-                return Err(("expected 'then' and 'else' branch to have equal types".to_string(), *expr.range()));
+                return Err(("expected 'then' and 'else' branch to have equal types".to_string(), expr.range().clone()));
             }
             let else_addr = addr_gen.fresh_addr();
             let after_addr = addr_gen.fresh_addr();
@@ -349,7 +349,7 @@ pub fn code_v(
                 Ty::FunTy {
                     dom: Box::new(formal.ty.clone()),
                     cod: Box::new(acc),
-                    range: Range::dummy()
+                    range: 0..0
                 }
             });
             Ok((
@@ -386,14 +386,14 @@ pub fn code_v(
             ).collect::<Result<Vec<_>, _>>()?;
             let formal_tys = ty_fun.dom_ty_list();
             if formal_tys.len() < ty_code_args.len() {
-                return Err(("expected applied expression to have function type".to_string(), *fn_expr.range()))
+                return Err(("expected applied expression to have function type".to_string(), fn_expr.range().clone()))
             }
             let used_formal_tys : Vec<Ty> = formal_tys.iter().take(ty_code_args.len()).cloned().collect();
             for i in 0..ty_code_args.len() {
                 let (actual_ty, _) = &ty_code_args[i];
                 let formal_ty = &used_formal_tys[i];
                 if !Ty::is_equal(actual_ty, formal_ty) {
-                    return Err(("argument type mismatch".to_string(), *args[i].range()));
+                    return Err(("argument type mismatch".to_string(), args[i].range().clone()));
                 }
             }
             let arg_codes: Vector<i32> = ty_code_args.iter().rev().fold(
@@ -472,7 +472,7 @@ pub fn code_v(
                     if !Ty::is_equal(&synthesized_ty, ascribed_ty) {
                         return Err((
                             format!("ascribed type does not match synthesized type"),
-                            *bound_expr.range()
+                            bound_expr.range().clone()
                         ));
                     }
 
@@ -499,7 +499,7 @@ pub fn code_v(
                 stack_level
             )?;
             Ok((
-                Ty::RefTy { contained_ty: Box::new(init_ty), range: Range::dummy() },
+                Ty::RefTy { contained_ty: Box::new(init_ty), range: 0..0 },
                 init_code + vector![instr::mk_ref()]
             ))
         },
@@ -515,7 +515,7 @@ pub fn code_v(
                 _ => {
                     return Err((
                         format!("Expected {:?} to have a reference type but instead found {}", ref_expr, ref_expr_ty),
-                        *range
+                        range.clone()
                     ));
                 }
             };
@@ -542,19 +542,19 @@ pub fn code_v(
                     if !Ty::is_equal(&*contained_ty, &new_val_ty) {
                         return Err((
                             format!("expected lhs to have type Ref {} but instead had type {}", new_val_ty, ref_expr_ty),
-                            *range
+                            range.clone()
                         ));
                     }
                 },
                 _ => {
                     return Err((
                         format!("expected lhs to have reference type but instead had type {}", ref_expr_ty),
-                        *range
+                        range.clone()
                     ));
                 }
             }
             Ok((
-                Ty::ProdTy{ components: vec![], range: Range::dummy() },
+                Ty::ProdTy{ components: vec![], range: 0..0 },
                 new_val_code + ref_expr_code + vector![instr::ref_assign()]
             ))
         },
@@ -571,7 +571,7 @@ pub fn code_v(
                 _ => {
                     return Err((
                         "expected first expression to have unit type".to_string(),
-                        *first.range()
+                        first.range().clone()
                     ));
                 }
             }

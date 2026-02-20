@@ -1,4 +1,5 @@
 use chumsky::prelude::*;
+use chumsky::Stream;
 use crate::syntax::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -7,7 +8,7 @@ pub enum Token {
     Id(String),
     Constructor(String),
     Int(i32),
-    
+
     // Delimiters
     LParen,
     RParen,
@@ -15,7 +16,7 @@ pub enum Token {
     RBrack,
     LSquareBrack,
     RSquareBrack,
-    
+
     // Operators
     Plus,
     Minus,
@@ -29,7 +30,7 @@ pub enum Token {
     Assign,
     Bang,
     Pipe,
-    
+
     // Keywords
     Let,
     In,
@@ -46,7 +47,7 @@ pub enum Token {
     Ref,
     Typedef,
     To,
-    
+
     // Punctuation
     Semicolon,
     Comma,
@@ -54,9 +55,9 @@ pub enum Token {
     TypeInt,
 }
 
-pub fn lexer() -> impl Parser<char, Vec<Token>, Error = Simple<char>> {
+pub fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>> {
     let int = text::int(10).map(|s: String| Token::Int(s.parse().unwrap()));
-    
+
     let id = text::ident().map(|s: String| {
         match s.as_str() {
             "let" => Token::Let,
@@ -84,7 +85,7 @@ pub fn lexer() -> impl Parser<char, Vec<Token>, Error = Simple<char>> {
             }
         }
     });
-    
+
     let op = choice((
         just("==").to(Token::Eq),
         just("<=").to(Token::Leq),
@@ -109,22 +110,25 @@ pub fn lexer() -> impl Parser<char, Vec<Token>, Error = Simple<char>> {
         just(",").to(Token::Comma),
         just(":").to(Token::Colon),
     ));
-    
+
     let comment = just("//").then(take_until(text::newline())).ignored();
-    
-    let token = choice((int, id, op)).padded();
-    
+
+    let padding = comment.or(text::whitespace().at_least(1).ignored()).repeated();
+
+    let token = choice((int, id, op))
+        .map_with_span(|tok, span| (tok, span))
+        .padded_by(padding);
+
     token
         .repeated()
         .then_ignore(end())
-        .padded_by(comment.repeated())
 }
 
 pub fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone {
     recursive(|expr| {
-        let int = select! { Token::Int(n) => Expr::Int(n, Range::dummy()) };
-        let var = select! { Token::Id(name) => Expr::Var(name, Range::dummy()) };
-        
+        let int = select! { Token::Int(n) => n }.map_with_span(|n, span| Expr::Int(n, span));
+        let var = select! { Token::Id(name) => name }.map_with_span(|name, span| Expr::Var(name, span));
+
         // Function abstraction: (fun (param : type) -> expr)
         let fun_abstraction = just(Token::Fun)
             .ignore_then(just(Token::LParen))
@@ -138,12 +142,12 @@ pub fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone 
             .then_ignore(just(Token::RParen))
             .then_ignore(just(Token::To))
             .then(expr.clone())
-            .map(|(formals, body)| Expr::FunAbstraction {
+            .map_with_span(|(formals, body), span| Expr::FunAbstraction {
                 formals,
                 body: Box::new(body),
-                range: Range::dummy(),
+                range: span,
             });
-        
+
         // Let expression: let x = expr in expr OR let (x,y,z) = expr in expr
         let let_expr = just(Token::Let)
             .ignore_then(choice((
@@ -159,7 +163,7 @@ pub fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone 
                         component_vars,
                         bind_to: Box::new(bind_to),
                         body: Box::new(body),
-                        range: Range::dummy(),
+                        range: 0..0,
                     }),
                 // Simple let: let x = expr in expr
                 select! { Token::Id(name) => name }
@@ -171,10 +175,11 @@ pub fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone 
                         bound_var,
                         bind_to: Box::new(bind_to),
                         body: Box::new(body),
-                        range: Range::dummy(),
+                        range: 0..0,
                     }),
-            )));
-        
+            )))
+            .map_with_span(|e, span| e.with_span(span));
+
         // Let rec expression: let rec bindings in expr
         let let_rec = just(Token::Let)
             .ignore_then(just(Token::Rec))
@@ -189,12 +194,12 @@ pub fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone 
             )
             .then_ignore(just(Token::In))
             .then(expr.clone())
-            .map(|(bindings, body)| Expr::LetRec {
+            .map_with_span(|(bindings, body), span| Expr::LetRec {
                 bindings,
                 body: Box::new(body),
-                range: Range::dummy(),
+                range: span,
             });
-        
+
         // If-then-else: if expr then expr else expr
         let if_then_else = just(Token::If)
             .ignore_then(expr.clone())
@@ -202,13 +207,13 @@ pub fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone 
             .then(expr.clone())
             .then_ignore(just(Token::Else))
             .then(expr.clone())
-            .map(|((cond, then_expr), else_expr)| Expr::IfThenElse {
+            .map_with_span(|((cond, then_expr), else_expr), span| Expr::IfThenElse {
                 cond: Box::new(cond),
                 then_expr: Box::new(then_expr),
                 else_expr: Box::new(else_expr),
-                range: Range::dummy(),
+                range: span,
             });
-        
+
         // Match expression: match expr with cases
         let match_case = just(Token::Pipe)
             .ignore_then(choice((
@@ -218,69 +223,68 @@ pub fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone 
                     .then(just(Token::When).ignore_then(expr.clone()).or_not())
                     .then_ignore(just(Token::To))
                     .then(expr.clone())
-                    .map(|(((name, arg_var), when_cond), body)| MatchCase::ConstructorCase {
+                    .map_with_span(|(((name, arg_var), when_cond), body), span| MatchCase::ConstructorCase {
                         name,
                         arg_var,
                         when_cond: when_cond.map(Box::new),
                         body: Box::new(body),
-                        range: Range::dummy(),
+                        range: span,
                     }),
-                // Catch-all case: | var when guard -> expr  
+                // Catch-all case: | var when guard -> expr
                 select! { Token::Id(var_name) => var_name }
                     .then(just(Token::When).ignore_then(expr.clone()).or_not())
                     .then_ignore(just(Token::To))
                     .then(expr.clone())
-                    .map(|((var_name, when_cond), body)| MatchCase::CatchAllCase {
+                    .map_with_span(|((var_name, when_cond), body), span| MatchCase::CatchAllCase {
                         var_name,
                         when_cond: when_cond.map(Box::new),
                         body: Box::new(body),
-                        range: Range::dummy(),
+                        range: span,
                     }),
             )))
             .recover_with(skip_then_retry_until([Token::Pipe]));
-        
+
         let match_expr = just(Token::Match)
             .ignore_then(expr.clone())
             .then_ignore(just(Token::With))
             .then(match_case.repeated().at_least(1))
-            .map(|(scrutinee, cases)| Expr::Match {
+            .map_with_span(|(scrutinee, cases), span| Expr::Match {
                 scrutinee: Box::new(scrutinee),
                 cases,
-                range: Range::dummy(),
+                range: span,
             });
-        
+
         // Reference operations
         let ref_constructor = just(Token::Ref)
             .ignore_then(expr.clone())
-            .map(|init| Expr::RefConstructor {
+            .map_with_span(|init, span| Expr::RefConstructor {
                 init: Box::new(init),
-                range: Range::dummy(),
+                range: span,
             });
-        
-        
+
         // Constructor application: (Constructor expr)
         let constructor_app = just(Token::LParen)
             .ignore_then(select! { Token::Constructor(name) => name })
             .then(expr.clone())
             .then_ignore(just(Token::RParen))
-            .map(|(name, arg)| Expr::ConstructorApplication {
+            .map_with_span(|(name, arg), span| Expr::ConstructorApplication {
                 name,
                 arg: Box::new(arg),
-                range: Range::dummy(),
+                range: span,
             });
-        
+
         // Parenthesized expressions and tuples
         let paren_expr = expr.clone()
             .separated_by(just(Token::Comma))
             .delimited_by(just(Token::LParen), just(Token::RParen))
-            .map(|exprs| {
+            .map_with_span(|exprs, span| {
                 match exprs.len() {
-                    0 => Expr::Tuple(vec![], Range::dummy()),
+                    0 => Expr::Tuple(vec![], span),
                     1 => exprs.into_iter().next().unwrap(),
-                    _ => Expr::Tuple(exprs, Range::dummy()),
+                    _ => Expr::Tuple(exprs, span),
                 }
             });
-        
+
         let atom = choice((
             int,
             var,
@@ -293,38 +297,41 @@ pub fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone 
             constructor_app,
             paren_expr,
         ));
-        
+
         // Curried function application: f x y z (space-separated)
         let application = atom.clone()
             .then(atom.clone().repeated().boxed())
-            .map(|(fn_expr, args)| {
+            .map_with_span(|(fn_expr, args), span| {
                 if args.is_empty() {
                     fn_expr
                 } else {
                     Expr::Application {
                         fn_expr: Box::new(fn_expr),
                         args,
-                        range: Range::dummy(),
+                        range: span,
                     }
                 }
             });
-        
+
         // Unary operations: !expr
         let unary = choice((
             just(Token::Bang)
                 .ignore_then(application.clone())
-                .map(|ref_expr| Expr::Deref {
+                .map_with_span(|ref_expr, span| Expr::Deref {
                     ref_expr: Box::new(ref_expr),
-                    range: Range::dummy(),
+                    range: span,
                 }),
             application.clone(),
         ));
-        
+
         // Multiplicative operations
         let factor = unary.clone()
             .then(just(Token::Times).ignore_then(unary.clone()).repeated())
-            .foldl(|lhs, rhs| Expr::Times(Box::new(lhs), Box::new(rhs), Range::dummy()));
-        
+            .foldl(|lhs, rhs| {
+                let span = merge_spans(lhs.range(), rhs.range());
+                Expr::Times(Box::new(lhs), Box::new(rhs), span)
+            });
+
         // Additive operations
         let term = factor.clone()
             .then(choice((
@@ -332,13 +339,14 @@ pub fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone 
                 just(Token::Minus).to(false),
             )).then(factor.clone()).repeated())
             .foldl(|lhs, (is_plus, rhs)| {
+                let span = merge_spans(lhs.range(), rhs.range());
                 if is_plus {
-                    Expr::Plus(Box::new(lhs), Box::new(rhs), Range::dummy())
+                    Expr::Plus(Box::new(lhs), Box::new(rhs), span)
                 } else {
-                    Expr::Minus(Box::new(lhs), Box::new(rhs), Range::dummy())
+                    Expr::Minus(Box::new(lhs), Box::new(rhs), span)
                 }
             });
-        
+
         // Comparison operations
         let comparison = term.clone()
             .then(choice((
@@ -350,92 +358,98 @@ pub fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone 
             )).then(term.clone()).or_not())
             .map(|(lhs, rhs_opt)| {
                 if let Some((op_type, rhs)) = rhs_opt {
+                    let span = merge_spans(lhs.range(), rhs.range());
                     match op_type {
-                        0 => Expr::Eq(Box::new(lhs), Box::new(rhs), Range::dummy()),
-                        1 => Expr::Leq(Box::new(lhs), Box::new(rhs), Range::dummy()),
-                        2 => Expr::Geq(Box::new(lhs), Box::new(rhs), Range::dummy()),
-                        3 => Expr::Lt(Box::new(lhs), Box::new(rhs), Range::dummy()),
-                        4 => Expr::Gt(Box::new(lhs), Box::new(rhs), Range::dummy()),
+                        0 => Expr::Eq(Box::new(lhs), Box::new(rhs), span),
+                        1 => Expr::Leq(Box::new(lhs), Box::new(rhs), span),
+                        2 => Expr::Geq(Box::new(lhs), Box::new(rhs), span),
+                        3 => Expr::Lt(Box::new(lhs), Box::new(rhs), span),
+                        4 => Expr::Gt(Box::new(lhs), Box::new(rhs), span),
                         _ => unreachable!(),
                     }
                 } else {
                     lhs
                 }
             });
-        
+
         // Assignment: expr := expr (right-associative, lowest precedence)
-        let assignment = recursive(|assignment| {
+        let assignment = recursive(|assignment: chumsky::recursive::Recursive<Token, Expr, Simple<Token>>| {
             comparison.clone()
                 .then(just(Token::Assign).ignore_then(assignment.clone()).or_not())
                 .map(|(ref_expr, new_val)| {
                     if let Some(new_val) = new_val {
+                        let span = merge_spans(ref_expr.range(), new_val.range());
                         Expr::Assign {
                             ref_expr: Box::new(ref_expr),
                             new_val: Box::new(new_val),
-                            range: Range::dummy(),
+                            range: span,
                         }
                     } else {
                         ref_expr
                     }
                 })
         });
-        
+
         // Sequence: expr ; expr
         let sequence = assignment.clone()
             .then(just(Token::Semicolon).ignore_then(assignment.clone()).repeated())
-            .foldl(|first, second| Expr::Sequence {
-                first: Box::new(first),
-                second: Box::new(second),
-                range: Range::dummy(),
+            .foldl(|first: Expr, second: Expr| {
+                let span = merge_spans(first.range(), second.range());
+                Expr::Sequence {
+                    first: Box::new(first),
+                    second: Box::new(second),
+                    range: span,
+                }
             });
-        
+
         sequence
     })
 }
 
 pub fn type_parser() -> impl Parser<Token, Ty, Error = Simple<Token>> + Clone {
     recursive(|ty| {
-        let int_ty = just(Token::TypeInt).map(|_| Ty::IntTy(Range::dummy()));
-        
-        let id_ty = select! { Token::Id(name) => Ty::IdTy { name, range: Range::dummy() } };
-        
+        let int_ty = just(Token::TypeInt).map_with_span(|_, span| Ty::IntTy(span));
+
+        let id_ty = select! { Token::Id(name) => name }
+            .map_with_span(|name, span| Ty::IdTy { name, range: span });
+
         // Reference type: Ref type
         let ref_ty = just(Token::Ref)
             .ignore_then(ty.clone())
-            .map(|contained_ty| Ty::RefTy {
+            .map_with_span(|contained_ty, span| Ty::RefTy {
                 contained_ty: Box::new(contained_ty),
-                range: Range::dummy(),
+                range: span,
             });
-        
+
         // Product type (tuples): (type, type, ...)
         let prod_ty = ty.clone()
             .separated_by(just(Token::Comma))
             .delimited_by(just(Token::LParen), just(Token::RParen))
-            .map(|components| {
+            .map_with_span(|components, span| {
                 if components.len() == 1 {
                     components.into_iter().next().unwrap()
                 } else {
-                    Ty::ProdTy { components, range: Range::dummy() }
+                    Ty::ProdTy { components, range: span }
                 }
             });
-        
+
         let atom_ty = choice((int_ty, id_ty, ref_ty, prod_ty));
-        
+
         // Function type: type -> type (right associative)
         let fun_ty = atom_ty.clone()
             .then(just(Token::To).ignore_then(ty.clone()).or_not())
-            .map(|(dom, cod_opt)| {
+            .map_with_span(|(dom, cod_opt), span| {
                 if let Some(cod) = cod_opt {
                     Ty::FunTy {
                         dom: Box::new(dom),
                         cod: Box::new(cod),
-                        range: Range::dummy(),
+                        range: span,
                     }
                 } else {
                     dom
                 }
             });
-        
+
         fun_ty
     })
 }
@@ -446,15 +460,15 @@ pub fn typedef_parser() -> impl Parser<Token, Typedef, Error = Simple<Token>> {
         .then_ignore(just(Token::Of))
         .then(type_parser())
         .map(|(constructor_name, ty)| Variant { constructor_name, ty });
-    
+
     just(Token::Typedef)
         .ignore_then(select! { Token::Constructor(typename) => typename })
         .then_ignore(just(Token::Bind))
         .then(variant.repeated().at_least(1))
-        .map(|(typename, variants)| Typedef {
+        .map_with_span(|(typename, variants), span| Typedef {
             typename,
             variants,
-            range: Range::dummy(),
+            range: span,
         })
 }
 
@@ -468,14 +482,18 @@ pub fn prog_parser() -> impl Parser<Token, Prog, Error = Simple<Token>> {
 
 pub fn parse_expr(input: &str) -> Result<Expr, Vec<Simple<char>>> {
     let tokens = lexer().parse(input)?;
-    expr_parser().parse(tokens).map_err(|errs| {
+    let len = input.len();
+    let stream = Stream::from_iter(len..len + 1, tokens.into_iter());
+    expr_parser().parse(stream).map_err(|errs| {
         errs.into_iter().map(|e| Simple::custom(e.span(), format!("{:?}", e))).collect()
     })
 }
 
 pub fn parse_prog(input: &str) -> Result<Prog, Vec<Simple<char>>> {
     let tokens = lexer().parse(input)?;
-    prog_parser().parse(tokens).map_err(|errs| {
+    let len = input.len();
+    let stream = Stream::from_iter(len..len + 1, tokens.into_iter());
+    prog_parser().parse(stream).map_err(|errs| {
         errs.into_iter().map(|e| Simple::custom(e.span(), format!("{:?}", e))).collect()
     })
 }
@@ -604,7 +622,7 @@ mod tests {
         }
     }
 
-    #[test] 
+    #[test]
     fn test_parse_single_paren() {
         let result = parse_expr("(42)");
         assert!(result.is_ok());
@@ -729,7 +747,8 @@ mod tests {
     #[test]
     fn test_parse_type_int() {
         let tokens = vec![Token::TypeInt];
-        let result = type_parser().parse(tokens);
+        let stream = Stream::from_iter(1..2, tokens.into_iter().map(|t| (t, 0..1)));
+        let result = type_parser().parse(stream);
         assert!(result.is_ok());
         match result.unwrap() {
             Ty::IntTy(_) => {},
@@ -740,7 +759,8 @@ mod tests {
     #[test]
     fn test_parse_type_function() {
         let tokens = vec![Token::TypeInt, Token::To, Token::TypeInt];
-        let result = type_parser().parse(tokens);
+        let stream = Stream::from_iter(1..2, tokens.into_iter().map(|t| (t, 0..1)));
+        let result = type_parser().parse(stream);
         assert!(result.is_ok());
         match result.unwrap() {
             Ty::FunTy { .. } => {},
@@ -751,7 +771,8 @@ mod tests {
     #[test]
     fn test_parse_type_product() {
         let tokens = vec![Token::LParen, Token::TypeInt, Token::Comma, Token::TypeInt, Token::RParen];
-        let result = type_parser().parse(tokens);
+        let stream = Stream::from_iter(1..2, tokens.into_iter().map(|t| (t, 0..1)));
+        let result = type_parser().parse(stream);
         assert!(result.is_ok());
         match result.unwrap() {
             Ty::ProdTy { components, .. } => assert_eq!(components.len(), 2),
@@ -763,7 +784,9 @@ mod tests {
     fn test_parse_typedef() {
         let input = "typedef Option = | Some of int | None of int";
         let tokens = lexer().parse(input).unwrap();
-        let result = typedef_parser().parse(tokens);
+        let len = input.len();
+        let stream = Stream::from_iter(len..len + 1, tokens.into_iter());
+        let result = typedef_parser().parse(stream);
         assert!(result.is_ok());
         match result.unwrap() {
             Typedef { typename, variants, .. } => {
@@ -821,6 +844,18 @@ mod tests {
         let input = "let rec fact : int -> int = fun (n : int) -> if n <= 1 then 1 else n * fact(n - 1) in fact(5)";
         let result = parse_expr(input);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_lex_comments() {
+        let input = "\
+// this is a comment
+3 // another comment
++ 2";
+        let tokens = lexer().parse(input);
+        assert!(tokens.is_ok());
+        let tokens: Vec<Token> = tokens.unwrap().into_iter().map(|(tok, _)| tok).collect();
+        assert!(tokens == vec![Token::Int(3), Token::Plus, Token::Int(2)]);
     }
 
 }

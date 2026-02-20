@@ -1,22 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::ops::Range;
 
-#[derive(Debug, Clone, PartialEq, Copy)]
-pub struct Range {
-    pub start_line: usize,
-    pub start_col: usize,
-    pub end_line: usize,
-    pub end_col: usize,
-}
+pub type Span = Range<usize>;
 
-impl Range {
-    pub fn new(start_line: usize, start_col: usize, end_line: usize, end_col: usize) -> Self {
-        Range { start_line, start_col, end_line, end_col }
-    }
-
-    pub fn dummy() -> Self {
-        Range { start_line: 0, start_col: 0, end_line: 0, end_col: 0 }
-    }
+pub fn merge_spans(a: &Span, b: &Span) -> Span {
+    a.start..b.end
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -27,12 +16,12 @@ pub struct Variant {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ty {
-    IntTy(Range),
-    FunTy { dom: Box<Ty>, cod: Box<Ty>, range: Range },
-    ProdTy { components: Vec<Ty>, range: Range },
-    RefTy { contained_ty: Box<Ty>, range: Range },
-    SumTy { variants: HashMap<String, Ty>, range: Range },
-    IdTy { name: String, range: Range },
+    IntTy(Span),
+    FunTy { dom: Box<Ty>, cod: Box<Ty>, range: Span },
+    ProdTy { components: Vec<Ty>, range: Span },
+    RefTy { contained_ty: Box<Ty>, range: Span },
+    SumTy { variants: HashMap<String, Ty>, range: Span },
+    IdTy { name: String, range: Span },
 }
 
 impl Ty {
@@ -105,7 +94,7 @@ impl fmt::Display for Ty {
 pub struct Typedef {
     pub typename: String,
     pub variants: Vec<Variant>,
-    pub range: Range,
+    pub range: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -121,94 +110,94 @@ pub enum MatchCase {
         arg_var: String,
         when_cond: Option<Box<Expr>>,
         body: Box<Expr>,
-        range: Range,
+        range: Span,
     },
     CatchAllCase {
         var_name: String,
         when_cond: Option<Box<Expr>>,
         body: Box<Expr>,
-        range: Range,
+        range: Span,
     },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
-    Plus(Box<Expr>, Box<Expr>, Range),
-    Minus(Box<Expr>, Box<Expr>, Range),
-    Times(Box<Expr>, Box<Expr>, Range),
-    Eq(Box<Expr>, Box<Expr>, Range),
-    Leq(Box<Expr>, Box<Expr>, Range),
-    Geq(Box<Expr>, Box<Expr>, Range),
-    Lt(Box<Expr>, Box<Expr>, Range),
-    Gt(Box<Expr>, Box<Expr>, Range),
+    Plus(Box<Expr>, Box<Expr>, Span),
+    Minus(Box<Expr>, Box<Expr>, Span),
+    Times(Box<Expr>, Box<Expr>, Span),
+    Eq(Box<Expr>, Box<Expr>, Span),
+    Leq(Box<Expr>, Box<Expr>, Span),
+    Geq(Box<Expr>, Box<Expr>, Span),
+    Lt(Box<Expr>, Box<Expr>, Span),
+    Gt(Box<Expr>, Box<Expr>, Span),
     FunAbstraction {
         formals: Vec<Formal>,
         body: Box<Expr>,
-        range: Range,
+        range: Span,
     },
-    Var(String, Range),
+    Var(String, Span),
     Let {
         bound_var: String,
         bind_to: Box<Expr>,
         body: Box<Expr>,
-        range: Range,
+        range: Span,
     },
     LetRec {
         bindings: Vec<(String, Ty, Expr)>,
         body: Box<Expr>,
-        range: Range,
+        range: Span,
     },
     Application {
         fn_expr: Box<Expr>,
         args: Vec<Expr>,
-        range: Range,
+        range: Span,
     },
     ConstructorApplication {
         name: String,
         arg: Box<Expr>,
-        range: Range,
+        range: Span,
     },
     Match {
         scrutinee: Box<Expr>,
         cases: Vec<MatchCase>,
-        range: Range,
+        range: Span,
     },
     IfThenElse {
         cond: Box<Expr>,
         then_expr: Box<Expr>,
         else_expr: Box<Expr>,
-        range: Range,
+        range: Span,
     },
-    Int(i32, Range),
-    Tuple(Vec<Expr>, Range),
+    Int(i32, Span),
+    Tuple(Vec<Expr>, Span),
     LetTuple {
         component_vars: Vec<String>,
         bind_to: Box<Expr>,
         body: Box<Expr>,
-        range: Range,
+        range: Span,
     },
     RefConstructor {
         init: Box<Expr>,
-        range: Range,
+        range: Span,
     },
     Deref {
         ref_expr: Box<Expr>,
-        range: Range,
+        range: Span,
     },
     Assign {
         ref_expr: Box<Expr>,
         new_val: Box<Expr>,
-        range: Range,
+        range: Span,
     },
     Sequence {
         first: Box<Expr>,
         second: Box<Expr>,
-        range: Range,
+        range: Span,
     },
 }
 
 impl Expr {
-    pub fn range(&self) -> &Range {
+    pub fn range(&self) -> &Span {
         match self {
             Expr::Plus(_, _, rng) | Expr::Minus(_, _, rng) | Expr::Times(_, _, rng)
             | Expr::Eq(_, _, rng) | Expr::Leq(_, _, rng) | Expr::Geq(_, _, rng)
@@ -221,6 +210,22 @@ impl Expr {
             | Expr::RefConstructor { range, .. } | Expr::Deref { range, .. }
             | Expr::Assign { range, .. } | Expr::Sequence { range, .. } => range,
         }
+    }
+
+    pub fn with_span(mut self, new_span: Span) -> Self {
+        match &mut self {
+            Expr::Plus(_, _, rng) | Expr::Minus(_, _, rng) | Expr::Times(_, _, rng)
+            | Expr::Eq(_, _, rng) | Expr::Leq(_, _, rng) | Expr::Geq(_, _, rng)
+            | Expr::Lt(_, _, rng) | Expr::Gt(_, _, rng) | Expr::Var(_, rng)
+            | Expr::Int(_, rng) | Expr::Tuple(_, rng) => *rng = new_span,
+            Expr::FunAbstraction { range, .. } | Expr::Let { range, .. }
+            | Expr::LetRec { range, .. } | Expr::Application { range, .. }
+            | Expr::ConstructorApplication { range, .. } | Expr::Match { range, .. }
+            | Expr::IfThenElse { range, .. } | Expr::LetTuple { range, .. }
+            | Expr::RefConstructor { range, .. } | Expr::Deref { range, .. }
+            | Expr::Assign { range, .. } | Expr::Sequence { range, .. } => *range = new_span,
+        }
+        self
     }
 
     pub fn free_vars(&self) -> HashSet<String> {
