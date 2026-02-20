@@ -120,7 +120,6 @@ fn test_call_arg2() {
 }
 
 #[test]
-#[ignore = "Requires tuple implementation"]
 fn test_tuple() {
     run_test_expr("let (x, y) = (3, 4) in x + y", 7);
 }
@@ -147,13 +146,11 @@ fn test_factorial() {
 }
 
 #[test]
-#[ignore = "Requires tuple implementation"]
 fn test_empty_tuple() {
     run_test_expr("let () = () in 1", 1);
 }
 
 #[test]
-#[ignore = "Requires tuple implementation"]
 fn test_fact_tuple() {
     run_test_expr("let rec fact : int -> int = fun (n : int) -> if n <= 1 then 1 else n * (fact (n - 1)) in let (x, y) = (fact 3, fact 4) in x + y", 30);
 }
@@ -211,9 +208,8 @@ fn cbv_constructor() {
 }
 
 #[test]
-#[ignore = "Requires tuple implementation"]
 fn cbv_tuples() {
-    run_test_expr("let z = ref 0 in z := !z + 1; (!z, !z)", 1);
+    run_test_expr("let z = ref 0 in z := !z + 1; let (a,b) = (!z, !z) in a", 1);
 }
 
 #[test]
@@ -232,13 +228,26 @@ fn tail_call() {
 }
 
 #[test]
-#[ignore = "Requires tuple implementation"]
 fn test_dont_collect_gp() {
-    run_test_expr("let mkIncrementer = fun () -> let rec foo : int -> int = fun (z : int) -> if z == 100000 then 1 else foo (z + 1) in fun () -> foo 0 in (mkIncrementer ()) ()", 1);
+    run_test_expr(
+        "let mkIncrementer = fun () -> \
+            let rec foo : int -> int = fun (z : int) -> \
+                if z == 100000 then 1 else foo (z + 1) \
+            in fun () -> foo 0 \
+         in (mkIncrementer ()) ()",
+        1
+    );
 }
 
 #[test]
-#[ignore = "Requires tuple implementation"]
 fn test_dont_collect_gp2() {
-    run_test_expr("let mkFoo = fun () -> let z = ref 0 in let rec foo : int -> int = fun (x : int) -> if x == 100000 then (z := !z + 1; !z) else foo (x + 1) in foo in (mkFoo ()) 0", 1);
+    run_test_expr(
+        "let mkFoo = fun () -> \
+            let z = ref 0 in \
+            let rec foo : int -> int = fun (x : int) -> \
+                if x == 100000 then (z := !z + 1; !z) else foo (x + 1) \
+            in foo \
+         in (mkFoo ()) 0",
+        1
+    );
 }
