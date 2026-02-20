@@ -8,6 +8,10 @@ pub fn merge_spans(a: &Span, b: &Span) -> Span {
     a.start..b.end
 }
 
+pub fn dummy_span() -> Span {
+    0..0
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Variant {
     pub constructor_name: String,
