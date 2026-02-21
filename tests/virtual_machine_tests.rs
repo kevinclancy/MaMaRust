@@ -230,6 +230,15 @@ fn test_let_constructor_pattern_add_fields() {
 }
 
 #[test]
+fn test_let_constructor_pattern_tuple_fields() {
+    run_test_prog(
+        "typedef Pair = | MkPair {fst : (int, int, int), snd : (int, int, int)} \
+         let (MkPair {fst : (a, b, c), snd : (d, e, f)}) = (MkPair {fst : (1, 2, 3), snd : (4, 5, 6)}) in a + b + c + d + e + f",
+        21
+    );
+}
+
+#[test]
 fn test_let_constructor_nested_tuple() {
     run_test_prog(
         "typedef Wrapper = | Wrap {val : (int, int)} \
