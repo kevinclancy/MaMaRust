@@ -375,9 +375,8 @@ pub fn execute(vm: &mut VirtualMachine) -> i32 {
           0x26 => { // JumpNZ(destAddr)
             let dest_addr : i32 = (instr & 0x00FFFF00) >> 8;
             println!("JumpNZ {dest_addr}");
-            let n = heap.expect_basic(vm.ss[vm.ssp]);
-            vm.pc = if n != 0 { dest_addr } else { vm.pc + 1 };
-            vm.ssp -= 1;
+            vm.pc = if vm.s[vm.sp] != 0 { dest_addr } else { vm.pc + 1 };
+            vm.sp -= 1;
           },
           0x27 => { // JumpI(jump_offset)
             let jump_offset : i32 = (instr & 0x00FFFF00) >> 8;
