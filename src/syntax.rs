@@ -15,7 +15,7 @@ pub fn dummy_span() -> Span {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Variant {
     pub constructor_name: String,
-    pub ty: Ty,
+    pub fields: Vec<(String, Ty, Span)>
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -24,7 +24,11 @@ pub enum Ty {
     FunTy { dom: Box<Ty>, cod: Box<Ty>, range: Span },
     ProdTy { components: Vec<Ty>, range: Span },
     RefTy { contained_ty: Box<Ty>, range: Span },
-    SumTy { variants: HashMap<String, Ty>, range: Span },
+    SumTy {
+        /// Maps each constructor name to its vec of fields
+        variants: HashMap<String, Vec<(String, Ty)>>,
+        range: Span
+    },
     IdTy { name: String, range: Span },
 }
 
@@ -45,8 +49,13 @@ impl Ty {
             }
             (Ty::SumTy { variants: var_a, .. }, Ty::SumTy { variants: var_b, .. }) => {
                 var_a.len() == var_b.len() &&
-                var_a.iter().all(|(name, ty_a)| {
-                    var_b.get(name).map_or(false, |ty_b| ty_a.is_equal(ty_b))
+                var_a.iter().all(|(name, fields_a)| {
+                    var_b.get(name).map_or(false, |fields_b| {
+                        fields_a.len() == fields_b.len() &&
+                        fields_a.iter().zip(fields_b.iter()).all(|((name_a, ty_a), (name_b, ty_b))| {
+                            name_a == name_b && ty_a.is_equal(ty_b)
+                        })
+                    })
                 })
             }
             (Ty::IdTy { name: name_a, .. }, Ty::IdTy { name: name_b, .. }) => {
@@ -125,6 +134,40 @@ pub enum MatchCase {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum Pattern {
+    Var(String, Span),
+    ConstructorApplication{
+        name: String,
+        fields: HashMap<String, Box<Pattern>>,
+        /// Are missing fields allowed?
+        open: bool,
+        span: Span
+
+    },
+    Int(i32, Span),
+    Tuple(Vec<Pattern>, Span)
+}
+
+impl Pattern {
+    pub fn bound_vars(&self) -> HashSet<String> {
+        match self {
+            Pattern::Var(name, _) => {
+                let mut set = HashSet::new();
+                set.insert(name.clone());
+                set
+            },
+            Pattern::Int(_, _) => HashSet::new(),
+            Pattern::Tuple(pats, _) => {
+                pats.iter().flat_map(|p| p.bound_vars()).collect()
+            },
+            Pattern::ConstructorApplication { fields, .. } => {
+                fields.values().flat_map(|p| p.bound_vars()).collect()
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Plus(Box<Expr>, Box<Expr>, Span),
     Minus(Box<Expr>, Box<Expr>, Span),
@@ -141,7 +184,7 @@ pub enum Expr {
     },
     Var(String, Span),
     Let {
-        bound_var: String,
+        bound_pat: Box<Pattern>,
         bind_to: Box<Expr>,
         body: Box<Expr>,
         range: Span,
@@ -158,7 +201,7 @@ pub enum Expr {
     },
     ConstructorApplication {
         name: String,
-        arg: Box<Expr>,
+        fields: Vec<(String, Box<Expr>, Span)>,
         range: Span,
     },
     Match {
@@ -253,9 +296,11 @@ impl Expr {
                 set
             }
 
-            Expr::Let { bound_var, bind_to, body, .. } => {
-                let mut body_free = body.free_vars();
-                body_free.remove(bound_var);
+            Expr::Let { bound_pat, bind_to, body, .. } => {
+                let body_free = body.free_vars()
+                    .difference(&bound_pat.bound_vars())
+                    .cloned()
+                    .collect();
                 bind_to.free_vars().union(&body_free).cloned().collect()
             }
 
@@ -280,8 +325,12 @@ impl Expr {
                 all_free
             }
 
-            Expr::ConstructorApplication { arg, .. } => {
-                arg.free_vars()
+            Expr::ConstructorApplication { fields, .. } => {
+                let mut all_free = HashSet::new();
+                for (_, expr, _) in fields {
+                    all_free.extend(expr.free_vars());
+                }
+                all_free
             }
 
             Expr::Match { scrutinee, cases, .. } => {

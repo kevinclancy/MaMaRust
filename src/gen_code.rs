@@ -1,4 +1,4 @@
-use crate::{code_builder::{add, get_basic, load_c, mk_basic, mk_vec, sub, symbolic_addr}, syntax::{Expr, Span, Ty, dummy_span}};
+use crate::{code_builder::{add, get_basic, load_c, mk_basic, mk_vec, sub, symbolic_addr}, syntax::{Expr, Pattern, Prog, Span, Ty, Typedef, dummy_span}};
 use im::{HashMap, Vector, vector};
 use crate::code_builder as instr;
 
@@ -44,6 +44,16 @@ pub struct VarContextEntry {
     pub ty: Ty,
 }
 
+#[derive(Debug, Clone)]
+pub struct ConstructorSig {
+    /// Maps each field name to the type of the field
+    fields : HashMap<String, Ty>,
+    /// The name of the discriminated union type being constructed
+    ty_id : String,
+    /// An integer that identifies that variant among all variants of type `ty_id`
+    variant_id : u16
+}
+
 /// Contextual information relevant to a position in source code.
 /// This includes types of bound variables and other things.
 #[derive(Debug, Clone)]
@@ -51,20 +61,61 @@ pub struct Context {
     /// Maps each variable name in context to its address and type
     pub var_ctxt: HashMap<String, VarContextEntry>,
     pub ty_ctxt: HashMap<String, Ty>,
-    pub constructor_ctxt: HashMap<String, Ty>,
+    pub constructor_ctxt: HashMap<String, ConstructorSig>,
     /// Some(n) if we're in tail position in an n-parameter function definition, None otherwise
     pub tail_pos: Option<u8>,
+    pub fail_addr: u16
 }
 
 impl Context {
-    pub fn new() -> Self {
+    pub fn new(fail_addr: u16) -> Self {
         Context {
             var_ctxt: HashMap::new(),
             ty_ctxt: HashMap::new(),
             constructor_ctxt: HashMap::new(),
             tail_pos: None,
+            fail_addr
         }
     }
+}
+
+/// Process a list of typedefs, registering each type and its constructors in the context.
+pub fn process_typedefs(ctxt: &mut Context, typedefs: &[Typedef]) -> Result<(), (String, Span)> {
+    for typedef in typedefs {
+        let sum_variants: std::collections::HashMap<String, Vec<(String, Ty)>> = typedef.variants.iter().map(|v| {
+            let fields: Vec<(String, Ty)> = v.fields.iter().map(|(name, ty, _)| (name.clone(), ty.clone())).collect();
+            (v.constructor_name.clone(), fields)
+        }).collect();
+        let sum_ty = Ty::SumTy {
+            variants: sum_variants,
+            range: typedef.range.clone(),
+        };
+        ctxt.ty_ctxt = ctxt.ty_ctxt.update(typedef.typename.clone(), sum_ty);
+        for (i, variant) in typedef.variants.iter().enumerate() {
+            let field_map: HashMap<String, Ty> = variant.fields.iter().map(|(name, ty, _)| {
+                (name.clone(), ty.clone())
+            }).collect();
+            let sig = ConstructorSig {
+                fields: field_map,
+                ty_id: typedef.typename.clone(),
+                variant_id: i as u16,
+            };
+            ctxt.constructor_ctxt = ctxt.constructor_ctxt.update(variant.constructor_name.clone(), sig);
+        }
+    }
+    Ok(())
+}
+
+/// Generate code for a complete program: process typedefs to build the context,
+/// then generate code for the body expression.
+pub fn gen_code_prog(prog: &Prog) -> Result<(Ty, Vector<i32>), (String, Span)> {
+    let mut addr_gen = AddressGenerator::new();
+    let fail_addr = addr_gen.fresh_addr();
+    let fail_code = vector![instr::symbolic_addr(fail_addr), instr::halt()];
+    let mut ctxt = Context::new(fail_addr);
+    process_typedefs(&mut ctxt, &prog.typedefs)?;
+    let (ty, code) = code_v(&ctxt, &mut addr_gen, &prog.expr, 0)?;
+    Ok((ty, code + fail_code))
 }
 
 /// If the variable `var_name` is in context, return its type and an instruction
@@ -472,14 +523,22 @@ pub fn code_v(
                 code_bind_to + vector![instr::get_vec()] + code_body + vector![instr::slide(num_components as u8,1)]
             ))
         },
-        Expr::Let{ bound_var, bind_to, body, .. } => {
+        Expr::Let{ bound_pat, bind_to, body, .. } => {
             let (ty_bound, code_bound) = code_v(ctxt, addr_gen, bind_to, stack_level)?;
-            let var_entry = VarContextEntry { address: Address::Local(stack_level as i16 + 1), ty: ty_bound };
-            let ctxt_2 = Context { var_ctxt: ctxt.var_ctxt.update(bound_var.clone(), var_entry), ..ctxt.clone() };
-            let (ty_body, code_body) = code_v(&ctxt_2, addr_gen, body, stack_level + 1)?;
+            let (pattern_code, ctxt_2, num_bindings) = code_pattern(
+                ctxt,
+                addr_gen,
+                bound_pat,
+                &ty_bound,
+                ctxt.fail_addr,
+                0,
+                stack_level+1,
+                stack_level+1
+            )?;
+            let (ty_body, code_body) = code_v(&ctxt_2, addr_gen, body, stack_level + 1 + num_bindings)?;
             Ok((
                 ty_body,
-                code_bound + code_body + vector![instr::slide(1, 1)]
+                code_bound + pattern_code + code_body + vector![instr::slide(1, num_bindings + 1)]
             ))
         },
         Expr::Var(name, rng) => {
@@ -599,6 +658,41 @@ pub fn code_v(
                 new_val_code + ref_expr_code + vector![instr::ref_assign()]
             ))
         },
+        Expr::ConstructorApplication { name, fields, range } => {
+            let sig = ctxt.constructor_ctxt.get(name).ok_or_else(|| {
+                (format!("unknown constructor '{}'", name), range.clone())
+            })?;
+            let sig = sig.clone();
+            if fields.len() != sig.fields.len() {
+                return Err((
+                    format!("constructor '{}' expects {} fields, got {}", name, sig.fields.len(), fields.len()),
+                    range.clone()
+                ));
+            }
+            let mut field_codes: Vector<i32> = Vector::new();
+            for (i, (field_name, field_expr, field_span)) in fields.iter().enumerate() {
+                let expected_ty = sig.fields.get(field_name).ok_or_else(|| {
+                    (format!("constructor '{}' has no field '{}'", name, field_name), field_span.clone())
+                })?;
+                let (actual_ty, code) = code_v(
+                    &Context { tail_pos: None, ..ctxt.clone() },
+                    addr_gen,
+                    field_expr,
+                    stack_level + (i as u8)
+                )?;
+                if !Ty::is_equal(&actual_ty, expected_ty) {
+                    return Err((
+                        format!("field '{}' expected type {}, got {}", field_name, expected_ty, actual_ty),
+                        field_span.clone()
+                    ));
+                }
+                field_codes = field_codes + code;
+            }
+            Ok((
+                Ty::IdTy { name: sig.ty_id.clone(), range: 0..0 },
+                field_codes + vector![mk_vec(fields.len() as u16), instr::mk_sum(sig.variant_id)]
+            ))
+        }
         Expr::Sequence { first, second, .. } => {
             let (first_ty, first_code) = code_v(
                 &Context { tail_pos: None, ..ctxt.clone() },
@@ -622,5 +716,89 @@ pub fn code_v(
             ))
         },
         _ => panic!("{:?} not implemented", expr)
+    }
+}
+
+
+/// Returns a triple (`code`, `ctxt2`, `num_pushed`) where
+///
+/// * `code` pushes pattern-variable-bound values onto the stack and falls through on match,
+///    or jumps to `fail_addr` on mismatch (after restoring the stack to `base_stack_level`)
+/// * `ctxt2` is `ctxt` extended with the pattern variables
+/// * `num_pushed` is the number of values pushed to the stack
+///
+/// `scrut_depth` is how far below the current stack top the scrutinee sits (0 = top of stack).
+/// `base_stack_level` is the absolute stack level to restore to before jumping to `fail_addr`.
+/// `stack_level` is the absolute stack level used for addressing local variables.
+pub fn code_pattern(
+    ctxt: &Context,
+    addr_gen: &mut AddressGenerator,
+    pat: &Pattern,
+    scrut_ty: &Ty,
+    fail_addr: u16,
+    scrut_depth: u8,
+    base_stack_level: u8,
+    stack_level: u8
+) -> Result<(Vector<i32>, Context, u8), (String, Span)> {
+    match pat {
+        Pattern::Var(name, _) => {
+            let entry = VarContextEntry { ty: scrut_ty.clone(), address: Address::Local(stack_level as i16 - scrut_depth as i16) };
+            let ctxt2 = Context {
+                var_ctxt: ctxt.var_ctxt.update(name.clone(), entry),
+                ..ctxt.clone()
+            };
+            Ok((vector![], ctxt2, 0))
+        },
+        Pattern::Int(n, _) => {
+            let success_addr = addr_gen.fresh_addr();
+            let ctxt2 = ctxt.clone();
+            let instrs = vector![
+                instr::push_loc(scrut_depth as i16),
+                instr::get_basic(),
+                instr::load_c(*n),
+                instr::eq(),
+                instr::jump_nz(success_addr),
+                instr::slide(stack_level - base_stack_level + 1, 0),
+                instr::jump(fail_addr),
+                instr::symbolic_addr(success_addr)
+            ];
+            Ok((instrs, ctxt2, 0))
+        },
+        Pattern::Tuple(sub_pats, span) => {
+            let Ty::ProdTy { components: component_tys, .. } = scrut_ty else {
+                return Err(("expected scrutinee to have tuple type".to_string(), span.clone()));
+            };
+            if sub_pats.len() != component_tys.len() {
+                return Err((
+                    format!("tuple pattern has {} components but scrutinee has {}", sub_pats.len(), component_tys.len()),
+                    span.clone()
+                ));
+            }
+            let n = sub_pats.len() as u8;
+            let mut code = vector![instr::push_loc(scrut_depth as i16), instr::get_vec()];
+            let mut ctxt_acc = ctxt.clone();
+            let mut total_pushed: u8 = n;
+            for (i, (sub_pat, component_ty)) in sub_pats.iter().zip(component_tys.iter()).enumerate() {
+                let sub_depth = total_pushed - i as u8 - 1;
+                let component_stack_level = stack_level + total_pushed;
+                let (sub_code, ctxt2, sub_pushed) = code_pattern(
+                    &ctxt_acc,
+                    addr_gen,
+                    sub_pat,
+                    component_ty,
+                    fail_addr,
+                    sub_depth,
+                    base_stack_level,
+                    component_stack_level
+                )?;
+                code = code + sub_code;
+                ctxt_acc = ctxt2;
+                total_pushed += sub_pushed;
+            }
+            Ok((code, ctxt_acc, total_pushed))
+        },
+        _ => {
+            todo!()
+        }
     }
 }

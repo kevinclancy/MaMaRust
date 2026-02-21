@@ -124,6 +124,27 @@ pub fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>> {
         .then_ignore(end())
 }
 
+pub fn pattern_parser() -> impl Parser<Token, Pattern, Error = Simple<Token>> + Clone {
+    recursive(
+        |pat| {
+            choice((
+                select! { Token::Id(name) => name }
+                    .map_with_span(|name, span| Pattern::Var(name, span)),
+                select! { Token::Int(n) => n }
+                    .map_with_span(|n, span| Pattern::Int(n, span)),
+                just(Token::LParen)
+                    .ignore_then(just(Token::RParen))
+                    .map_with_span(|_, span| Pattern::Tuple(vec![], span)),
+                pat.clone()
+                    .separated_by(just(Token::Comma))
+                    .at_least(2)
+                    .delimited_by(just(Token::LParen), just(Token::RParen))
+                    .map_with_span(|pats, span| Pattern::Tuple(pats, span))
+            ))
+        }
+    )
+}
+
 pub fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone {
     recursive(|expr| {
         let int = select! { Token::Int(n) => n }.map_with_span(|n, span| Expr::Int(n, span));
@@ -159,34 +180,19 @@ pub fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone 
 
         // Let expression: let x = expr in expr OR let (x,y,z) = expr in expr
         let let_expr = just(Token::Let)
-            .ignore_then(choice((
-                // Tuple destructuring: let (x,y,z) = expr in expr
-                select! { Token::Id(name) => name }
-                    .separated_by(just(Token::Comma))
-                    .delimited_by(just(Token::LParen), just(Token::RParen))
+            .ignore_then(
+                pattern_parser()
                     .then_ignore(just(Token::Bind))
                     .then(expr.clone())
                     .then_ignore(just(Token::In))
                     .then(expr.clone())
-                    .map_with_span(|((component_vars, bind_to), body), span| Expr::LetTuple {
-                        component_vars,
+                    .map_with_span(|((bound_pat, bind_to), body),span| Expr::Let {
+                        bound_pat: Box::new(bound_pat),
                         bind_to: Box::new(bind_to),
                         body: Box::new(body),
                         range: span,
                     }),
-                // Simple let: let x = expr in expr
-                select! { Token::Id(name) => name }
-                    .then_ignore(just(Token::Bind))
-                    .then(expr.clone())
-                    .then_ignore(just(Token::In))
-                    .then(expr.clone())
-                    .map_with_span(|((bound_var, bind_to), body),span| Expr::Let {
-                        bound_var,
-                        bind_to: Box::new(bind_to),
-                        body: Box::new(body),
-                        range: span,
-                    }),
-            )))
+            )
             .map_with_span(|e, span| e.with_span(span));
 
         // Let rec expression: let rec bindings in expr
@@ -271,14 +277,21 @@ pub fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone 
                 range: span,
             });
 
-        // Constructor application: (Constructor expr)
+        let fields = select! { Token::Id(id) => id }
+            .then_ignore(just(Token::Colon))
+            .then(expr.clone())
+            .map_with_span(|(id, val), span| (id, Box::new(val), span))
+            .separated_by(just(Token::Comma))
+            .delimited_by(just(Token::LBrack), just(Token::RBrack));
+
+        // Constructor application: (Constructor {f1 : e1, f2 : e2})
         let constructor_app = just(Token::LParen)
             .ignore_then(select! { Token::Constructor(name) => name })
-            .then(expr.clone())
+            .then(fields)
             .then_ignore(just(Token::RParen))
-            .map_with_span(|(name, arg), span| Expr::ConstructorApplication {
+            .map_with_span(|(name, fields), span| Expr::ConstructorApplication {
                 name,
-                arg: Box::new(arg),
+                fields: fields,
                 range: span,
             });
 
@@ -464,11 +477,17 @@ pub fn type_parser() -> impl Parser<Token, Ty, Error = Simple<Token>> + Clone {
 }
 
 pub fn typedef_parser() -> impl Parser<Token, Typedef, Error = Simple<Token>> {
+    let fields = select! { Token::Id(id) => id }
+        .then_ignore(just(Token::Colon))
+        .then(type_parser())
+        .map_with_span(|(id, ty), span| (id, ty, span))
+        .separated_by(just(Token::Comma))
+        .delimited_by(just(Token::LBrack), just(Token::RBrack));
+
     let variant = just(Token::Pipe)
         .ignore_then(select! { Token::Constructor(name) => name })
-        .then_ignore(just(Token::Of))
-        .then(type_parser())
-        .map(|(constructor_name, ty)| Variant { constructor_name, ty });
+        .then(fields)
+        .map(|(constructor_name, fields)| Variant { constructor_name, fields });
 
     just(Token::Typedef)
         .ignore_then(select! { Token::Constructor(typename) => typename })
@@ -572,16 +591,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_let() {
-        let result = parse_expr("let x = 42 in x + 1");
-        assert!(result.is_ok());
-        match result.unwrap() {
-            Expr::Let { bound_var, .. } => assert_eq!(bound_var, "x"),
-            _ => panic!("Expected Let expression"),
-        }
-    }
-
-    #[test]
     fn test_parse_let_rec() {
         let result = parse_expr("let rec f : int -> int = fun (x : int) -> x + 1 in f 5");
         assert!(result.is_ok());
@@ -642,16 +651,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_let_tuple() {
-        let result = parse_expr("let (x, y) = (1, 2) in x + y");
-        assert!(result.is_ok());
-        match result.unwrap() {
-            Expr::LetTuple { component_vars, .. } => assert_eq!(component_vars.len(), 2),
-            _ => panic!("Expected LetTuple expression"),
-        }
-    }
-
-    #[test]
     fn test_parse_ref_constructor() {
         let result = parse_expr("ref 42");
         assert!(result.is_ok());
@@ -693,10 +692,14 @@ mod tests {
 
     #[test]
     fn test_parse_constructor_application() {
-        let result = parse_expr("(Some 42)");
+        let result = parse_expr("(Some {x : 42})");
         assert!(result.is_ok());
         match result.unwrap() {
-            Expr::ConstructorApplication { name, .. } => assert_eq!(name, "Some"),
+            Expr::ConstructorApplication { name, fields, .. } => {
+                assert_eq!(name, "Some");
+                assert_eq!(fields.len(), 1);
+                assert_eq!(fields[0].0, "x");
+            },
             _ => panic!("Expected ConstructorApplication expression"),
         }
     }
@@ -791,7 +794,7 @@ mod tests {
 
     #[test]
     fn test_parse_typedef() {
-        let input = "typedef Option = | Some of int | None of int";
+        let input = "typedef Option = | Some {val : int} | None {}";
         let tokens = lexer().parse(input).unwrap();
         let len = input.len();
         let stream = Stream::from_iter(len..len + 1, tokens.into_iter());
@@ -801,13 +804,15 @@ mod tests {
             Typedef { typename, variants, .. } => {
                 assert_eq!(typename, "Option");
                 assert_eq!(variants.len(), 2);
+                assert_eq!(variants[0].fields.len(), 1);
+                assert_eq!(variants[1].fields.len(), 0);
             }
         }
     }
 
     #[test]
     fn test_parse_prog_with_typedef() {
-        let input = "typedef Bool = | True of int | False of int\n42";
+        let input = "typedef Bool = | True {val : int} | False {val : int}\n42";
         let result = parse_prog(input);
         assert!(result.is_ok());
         match result.unwrap() {
@@ -853,6 +858,105 @@ mod tests {
         let input = "let rec fact : int -> int = fun (n : int) -> if n <= 1 then 1 else n * fact(n - 1) in fact(5)";
         let result = parse_expr(input);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_let_var_pat() {
+        let result = parse_expr("let x = 42 in x");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Expr::Let { bound_pat, .. } => {
+                match *bound_pat {
+                    Pattern::Var(name, _) => assert_eq!(name, "x"),
+                    _ => panic!("Expected Var pattern"),
+                }
+            },
+            _ => panic!("Expected Let expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_let_int_pat() {
+        let result = parse_expr("let 0 = 0 in 1");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Expr::Let { bound_pat, .. } => {
+                match *bound_pat {
+                    Pattern::Int(n, _) => assert_eq!(n, 0),
+                    _ => panic!("Expected Int pattern"),
+                }
+            },
+            _ => panic!("Expected Let expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_let_tuple_pat() {
+        let result = parse_expr("let (x, y) = (1, 2) in x + y");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Expr::Let { bound_pat, .. } => {
+                match *bound_pat {
+                    Pattern::Tuple(pats, _) => {
+                        assert_eq!(pats.len(), 2);
+                        match (&pats[0], &pats[1]) {
+                            (Pattern::Var(a, _), Pattern::Var(b, _)) => {
+                                assert_eq!(a, "x");
+                                assert_eq!(b, "y");
+                            },
+                            _ => panic!("Expected two Var sub-patterns"),
+                        }
+                    },
+                    _ => panic!("Expected Tuple pattern"),
+                }
+            },
+            _ => panic!("Expected Let expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_let_nested_tuple_pat() {
+        let result = parse_expr("let (x, (y, z)) = (1, (2, 3)) in x + y + z");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Expr::Let { bound_pat, .. } => {
+                match *bound_pat {
+                    Pattern::Tuple(pats, _) => {
+                        assert_eq!(pats.len(), 2);
+                        match &pats[1] {
+                            Pattern::Tuple(inner, _) => assert_eq!(inner.len(), 2),
+                            _ => panic!("Expected nested Tuple pattern"),
+                        }
+                    },
+                    _ => panic!("Expected Tuple pattern"),
+                }
+            },
+            _ => panic!("Expected Let expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_let_tuple_with_int_pat() {
+        let result = parse_expr("let (0, x) = (0, 42) in x");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Expr::Let { bound_pat, .. } => {
+                match *bound_pat {
+                    Pattern::Tuple(pats, _) => {
+                        assert_eq!(pats.len(), 2);
+                        match (&pats[0], &pats[1]) {
+                            (Pattern::Int(n, _), Pattern::Var(name, _)) => {
+                                assert_eq!(*n, 0);
+                                assert_eq!(name, "x");
+                            },
+                            _ => panic!("Expected Int and Var sub-patterns"),
+                        }
+                    },
+                    _ => panic!("Expected Tuple pattern"),
+                }
+            },
+            _ => panic!("Expected Let expression"),
+        }
     }
 
     #[test]
