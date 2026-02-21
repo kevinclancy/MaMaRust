@@ -212,6 +212,33 @@ fn test_match_catch_all_guard() {
 }
 
 #[test]
+fn test_let_constructor_pattern() {
+    run_test_prog(
+        "typedef Option = | Some {val : int} | None {} \
+         let (Some {val : x}) = (Some {val : 42}) in x",
+        42
+    );
+}
+
+#[test]
+fn test_let_constructor_pattern_add_fields() {
+    run_test_prog(
+        "typedef Pair = | MkPair {fst : int, snd : int} \
+         let (MkPair {fst : a, snd : b}) = (MkPair {fst : 3, snd : 4}) in a + b",
+        7
+    );
+}
+
+#[test]
+fn test_let_constructor_nested_tuple() {
+    run_test_prog(
+        "typedef Wrapper = | Wrap {val : (int, int)} \
+         let (Wrap {val : (x, y)}) = (Wrap {val : (10, 20)}) in x + y",
+        30
+    );
+}
+
+#[test]
 fn cbv_application() {
     run_test_prog("let z = ref 0 in let a = fun (x : int, y : int) -> !z + x + y in z := !z + 1; a (z := !z + 1; 1) (z := !z + 1; 1)", 5);
 }

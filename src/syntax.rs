@@ -138,7 +138,7 @@ pub enum Pattern {
     Var(String, Span),
     ConstructorApplication{
         name: String,
-        fields: HashMap<String, Box<Pattern>>,
+        fields: HashMap<String, (Box<Pattern>, Span)>,
         /// Are missing fields allowed?
         open: bool,
         span: Span
@@ -161,7 +161,7 @@ impl Pattern {
                 pats.iter().flat_map(|p| p.bound_vars()).collect()
             },
             Pattern::ConstructorApplication { fields, .. } => {
-                fields.values().flat_map(|p| p.bound_vars()).collect()
+                fields.values().flat_map(|p| p.0.bound_vars()).collect()
             },
         }
     }

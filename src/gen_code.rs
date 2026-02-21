@@ -46,8 +46,8 @@ pub struct VarContextEntry {
 
 #[derive(Debug, Clone)]
 pub struct ConstructorSig {
-    /// Maps each field name to the type of the field
-    fields : HashMap<String, Ty>,
+    /// Field names and types in the order they appear in the typedef declaration
+    fields : Vec<(String, Ty)>,
     /// The name of the discriminated union type being constructed
     ty_id : String,
     /// An integer that identifies that variant among all variants of type `ty_id`
@@ -92,11 +92,11 @@ pub fn process_typedefs(ctxt: &mut Context, typedefs: &[Typedef]) -> Result<(), 
         };
         ctxt.ty_ctxt = ctxt.ty_ctxt.update(typedef.typename.clone(), sum_ty);
         for (i, variant) in typedef.variants.iter().enumerate() {
-            let field_map: HashMap<String, Ty> = variant.fields.iter().map(|(name, ty, _)| {
+            let fields: Vec<(String, Ty)> = variant.fields.iter().map(|(name, ty, _)| {
                 (name.clone(), ty.clone())
             }).collect();
             let sig = ConstructorSig {
-                fields: field_map,
+                fields,
                 ty_id: typedef.typename.clone(),
                 variant_id: i as u16,
             };
@@ -671,9 +671,12 @@ pub fn code_v(
             }
             let mut field_codes: Vector<i32> = Vector::new();
             for (i, (field_name, field_expr, field_span)) in fields.iter().enumerate() {
-                let expected_ty = sig.fields.get(field_name).ok_or_else(|| {
-                    (format!("constructor '{}' has no field '{}'", name, field_name), field_span.clone())
-                })?;
+                let expected_ty = sig.fields.iter()
+                    .find(|(n, _)| n == field_name)
+                    .map(|(_, ty)| ty)
+                    .ok_or_else(|| {
+                        (format!("constructor '{}' has no field '{}'", name, field_name), field_span.clone())
+                    })?;
                 let (actual_ty, code) = code_v(
                     &Context { tail_pos: None, ..ctxt.clone() },
                     addr_gen,
@@ -797,8 +800,76 @@ pub fn code_pattern(
             }
             Ok((code, ctxt_acc, total_pushed))
         },
-        _ => {
-            todo!()
+        Pattern::ConstructorApplication { name, fields: pat_fields, open, span } => {
+            let sig = ctxt.constructor_ctxt.get(name).ok_or_else(|| {
+                (format!("unknown constructor '{}'", name), span.clone())
+            })?.clone();
+
+            let resolved_scrut_ty = match scrut_ty {
+                Ty::IdTy { name: ty_name, .. } => {
+                    ctxt.ty_ctxt.get(ty_name).ok_or_else(|| {
+                        (format!("unknown type '{}'", ty_name), span.clone())
+                    })?.clone()
+                },
+                other => other.clone()
+            };
+            let Ty::SumTy { variants, .. } = &resolved_scrut_ty else {
+                return Err(("expected scrutinee to have sum type".to_string(), span.clone()));
+            };
+            if !variants.contains_key(name) {
+                return Err((
+                    format!("constructor '{}' does not belong to scrutinee type", name),
+                    span.clone()
+                ));
+            }
+
+            let success_addr = addr_gen.fresh_addr();
+            let mut code = vector![
+                instr::push_loc(scrut_depth as i16),
+                instr::get_tag(),
+                instr::load_c(sig.variant_id as i32),
+                instr::eq(),
+                instr::jump_nz(success_addr),
+                instr::slide(stack_level - base_stack_level + 1, 0),
+                instr::jump(fail_addr),
+                instr::symbolic_addr(success_addr),
+                instr::push_loc(scrut_depth as i16),
+                instr::tget_constructor_arg(),
+                instr::get_vec()
+            ];
+
+            let n = sig.fields.len() as u8;
+            let mut ctxt_acc = ctxt.clone();
+            let mut total_pushed: u8 = n;
+            for (i, (field_name, field_ty)) in sig.fields.iter().enumerate() {
+                match pat_fields.get(field_name) {
+                    Some((sub_pat, _)) => {
+                        let sub_depth = total_pushed - i as u8 - 1;
+                        let component_stack_level = stack_level + total_pushed;
+                        let (sub_code, ctxt2, sub_pushed) = code_pattern(
+                            &ctxt_acc,
+                            addr_gen,
+                            sub_pat,
+                            field_ty,
+                            fail_addr,
+                            sub_depth,
+                            base_stack_level,
+                            component_stack_level
+                        )?;
+                        code = code + sub_code;
+                        ctxt_acc = ctxt2;
+                        total_pushed += sub_pushed;
+                    },
+                    None if *open => {},
+                    None => {
+                        return Err((
+                            format!("pattern for constructor '{}' is missing field '{}'", name, field_name),
+                            span.clone()
+                        ));
+                    }
+                }
+            }
+            Ok((code, ctxt_acc, total_pushed))
         }
     }
 }

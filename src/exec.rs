@@ -398,6 +398,13 @@ pub fn execute(vm: &mut VirtualMachine) -> i32 {
             vm.ssp = vm.ssp + elems.len() - 1;
             vm.pc += 1;
           },
+          0x2A => { // GetTag
+            println!("GetTag");
+            let (variant_id, _) = heap.expect_sum(vm.ss[vm.ssp]);
+            vm.sp += 1;
+            vm.s[vm.sp] = variant_id as i32;
+            vm.pc += 1;
+          },
           _ => panic!("invalid instruction")
       }
   }

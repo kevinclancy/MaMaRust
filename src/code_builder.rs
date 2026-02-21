@@ -185,6 +185,12 @@ pub fn get_tuple() -> i32 {
     0x29
 }
 
+/// Reads the variant tag from the sum value at the top of the shadow stack
+/// and pushes it as an integer onto the basic stack
+pub fn get_tag() -> i32 {
+    0x2A
+}
+
 pub fn symbolic_addr(addr: u16) -> i32 {
     (0xFFu32 as i32) | ((addr as i32) << 8)
 }

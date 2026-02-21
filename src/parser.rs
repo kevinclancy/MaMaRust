@@ -127,11 +127,28 @@ pub fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>> {
 pub fn pattern_parser() -> impl Parser<Token, Pattern, Error = Simple<Token>> + Clone {
     recursive(
         |pat| {
+            let fields = select! { Token::Id(id) => id }
+                .then_ignore(just(Token::Colon))
+                .then(pat.clone())
+                .map_with_span(|(id, val), span| (id, Box::new(val), span))
+                .separated_by(just(Token::Comma))
+                .delimited_by(just(Token::LBrack), just(Token::RBrack));
+
             choice((
                 select! { Token::Id(name) => name }
                     .map_with_span(|name, span| Pattern::Var(name, span)),
                 select! { Token::Int(n) => n }
                     .map_with_span(|n, span| Pattern::Int(n, span)),
+                just(Token::LParen)
+                    .ignore_then(select! { Token::Constructor(name) => name })
+                    .then(fields)
+                    .then_ignore(just(Token::RParen))
+                    .map_with_span(|(name, fields), span| Pattern::ConstructorApplication {
+                        name,
+                        fields: fields.into_iter().map(|(key, pat, span)| (key, (pat, span))).collect(),
+                        span,
+                        open: false
+                    }),
                 just(Token::LParen)
                     .ignore_then(just(Token::RParen))
                     .map_with_span(|_, span| Pattern::Tuple(vec![], span)),
@@ -953,6 +970,90 @@ mod tests {
                         }
                     },
                     _ => panic!("Expected Tuple pattern"),
+                }
+            },
+            _ => panic!("Expected Let expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_constructor_pattern_no_fields() {
+        let result = parse_expr("let (None {}) = x in 1");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Expr::Let { bound_pat, .. } => {
+                match *bound_pat {
+                    Pattern::ConstructorApplication { name, fields, open, .. } => {
+                        assert_eq!(name, "None");
+                        assert!(fields.is_empty());
+                        assert!(!open);
+                    },
+                    _ => panic!("Expected ConstructorApplication pattern"),
+                }
+            },
+            _ => panic!("Expected Let expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_constructor_pattern_one_field() {
+        let result = parse_expr("let (Some {val : x}) = e in x");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Expr::Let { bound_pat, .. } => {
+                match *bound_pat {
+                    Pattern::ConstructorApplication { name, fields, .. } => {
+                        assert_eq!(name, "Some");
+                        assert_eq!(fields.len(), 1);
+                        assert!(fields.contains_key("val"));
+                        match &*fields["val"].0 {
+                            Pattern::Var(v, _) => assert_eq!(v, "x"),
+                            _ => panic!("Expected Var sub-pattern"),
+                        }
+                    },
+                    _ => panic!("Expected ConstructorApplication pattern"),
+                }
+            },
+            _ => panic!("Expected Let expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_constructor_pattern_multiple_fields() {
+        let result = parse_expr("let (Pair {fst : a, snd : b}) = e in a + b");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Expr::Let { bound_pat, .. } => {
+                match *bound_pat {
+                    Pattern::ConstructorApplication { name, fields, .. } => {
+                        assert_eq!(name, "Pair");
+                        assert_eq!(fields.len(), 2);
+                        assert!(fields.contains_key("fst"));
+                        assert!(fields.contains_key("snd"));
+                    },
+                    _ => panic!("Expected ConstructorApplication pattern"),
+                }
+            },
+            _ => panic!("Expected Let expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_constructor_pattern_nested() {
+        let result = parse_expr("let (Some {val : (a, b)}) = e in a + b");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Expr::Let { bound_pat, .. } => {
+                match *bound_pat {
+                    Pattern::ConstructorApplication { name, fields, .. } => {
+                        assert_eq!(name, "Some");
+                        assert_eq!(fields.len(), 1);
+                        match &*fields["val"].0 {
+                            Pattern::Tuple(pats, _) => assert_eq!(pats.len(), 2),
+                            _ => panic!("Expected Tuple sub-pattern"),
+                        }
+                    },
+                    _ => panic!("Expected ConstructorApplication pattern"),
                 }
             },
             _ => panic!("Expected Let expression"),
