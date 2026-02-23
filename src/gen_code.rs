@@ -496,33 +496,6 @@ pub fn code_v(
                 push_components_code + vector![mk_vec(n)]
             ))
         },
-        Expr::LetTuple{ component_vars, bind_to, body, range:_ } => {
-            let num_components = component_vars.len();
-            let (ty_bind_to, code_bind_to) = code_v(ctxt, addr_gen, bind_to, stack_level)?;
-            let Ty::ProdTy { components: ty_components, range: _ } = ty_bind_to else {
-                return Err(("scrutinee expected to have tuple type".to_string(), bind_to.range().clone()))
-            };
-            if ty_components.len() != component_vars.len() {
-                return Err(("Wrong number of tuple components".to_string(), bind_to.range().clone()))
-            }
-            let var_ctxt_2 = component_vars.iter().enumerate().fold(ctxt.var_ctxt.clone(),
-                |acc, (i, var_name)| {
-                    acc.update(
-                        var_name.clone(),
-                         VarContextEntry {
-                            address: Address::Local(stack_level as i16 + i as i16 + 1),
-                            ty: ty_components[i].clone()
-                        }
-                    )
-                }
-            );
-            let ctxt_2 = Context { var_ctxt: var_ctxt_2, ..ctxt.clone() };
-            let (ty_body, code_body) = code_v(&ctxt_2, addr_gen, body, stack_level + (num_components as u8))?;
-            Ok((
-                ty_body,
-                code_bind_to + vector![instr::get_vec()] + code_body + vector![instr::slide(num_components as u8,1)]
-            ))
-        },
         Expr::Let{ bound_pat, bind_to, body, .. } => {
             let (ty_bound, code_bound) = code_v(ctxt, addr_gen, bind_to, stack_level)?;
             let (pattern_code, ctxt_2, num_bindings) = code_pattern(

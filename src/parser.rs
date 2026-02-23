@@ -246,32 +246,19 @@ pub fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone 
 
         // Match expression: match expr with cases
         let match_case = just(Token::Pipe)
-            .ignore_then(choice((
+            .ignore_then(
                 // Constructor case: | Constructor var when guard -> expr
-                select! { Token::Constructor(name) => name }
-                    .then(select! { Token::Id(var) => var })
+                pattern_parser()
                     .then(just(Token::When).ignore_then(expr.clone()).or_not())
                     .then_ignore(just(Token::To))
                     .then(expr.clone())
-                    .map_with_span(|(((name, arg_var), when_cond), body), span| MatchCase::ConstructorCase {
-                        name,
-                        arg_var,
+                    .map_with_span(|((pat, when_cond), body), span| MatchCase {
+                        pat,
                         when_cond: when_cond.map(Box::new),
                         body: Box::new(body),
                         range: span,
-                    }),
-                // Catch-all case: | var when guard -> expr
-                select! { Token::Id(var_name) => var_name }
-                    .then(just(Token::When).ignore_then(expr.clone()).or_not())
-                    .then_ignore(just(Token::To))
-                    .then(expr.clone())
-                    .map_with_span(|((var_name, when_cond), body), span| MatchCase::CatchAllCase {
-                        var_name,
-                        when_cond: when_cond.map(Box::new),
-                        body: Box::new(body),
-                        range: span,
-                    }),
-            )))
+                    })
+            )
             .recover_with(skip_then_retry_until([Token::Pipe]));
 
         let match_expr = just(Token::Match)
@@ -719,8 +706,8 @@ mod tests {
 
     #[test]
     fn test_parse_match() {
-        let result = parse_expr("match x with | Some y -> y");
-        assert!(result.is_ok());
+        let result = parse_expr("match x with | Some {y : y} -> y");
+        assert!(result.is_ok(), "{:?}", result.unwrap_err());
         match result.unwrap() {
             Expr::Match { cases, .. } => assert_eq!(cases.len(), 1),
             _ => panic!("Expected Match expression"),
@@ -729,7 +716,7 @@ mod tests {
 
     #[test]
     fn test_parse_match_multiple_cases() {
-        let result = parse_expr("match x with | Some y -> y | None z -> 0");
+        let result = parse_expr("match x with | Some {y:y} -> y | None {z : z} -> 0");
         assert!(result.is_ok());
         match result.unwrap() {
             Expr::Match { cases, .. } => assert_eq!(cases.len(), 2),
@@ -739,13 +726,13 @@ mod tests {
 
     #[test]
     fn test_parse_match_with_guard() {
-        let result = parse_expr("match x with | Some y when y > 0 -> y | _ -> 0");
+        let result = parse_expr("match x with | Some {y:y} when y > 0 -> y | _ -> 0");
         assert!(result.is_ok());
         match result.unwrap() {
             Expr::Match { cases, .. } => {
                 assert_eq!(cases.len(), 2);
                 match &cases[0] {
-                    MatchCase::ConstructorCase { when_cond, .. } => assert!(when_cond.is_some()),
+                    MatchCase { when_cond, .. } => assert!(when_cond.is_some()),
                     _ => panic!("Expected ConstructorCase with guard"),
                 }
             },

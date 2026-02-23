@@ -117,20 +117,11 @@ pub struct Formal {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum MatchCase {
-    ConstructorCase {
-        name: String,
-        arg_var: String,
-        when_cond: Option<Box<Expr>>,
-        body: Box<Expr>,
-        range: Span,
-    },
-    CatchAllCase {
-        var_name: String,
-        when_cond: Option<Box<Expr>>,
-        body: Box<Expr>,
-        range: Span,
-    },
+pub struct MatchCase {
+    pub pat: Pattern,
+    pub when_cond: Option<Box<Expr>>,
+    pub body: Box<Expr>,
+    pub range: Span
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -217,12 +208,6 @@ pub enum Expr {
     },
     Int(i32, Span),
     Tuple(Vec<Expr>, Span),
-    LetTuple {
-        component_vars: Vec<String>,
-        bind_to: Box<Expr>,
-        body: Box<Expr>,
-        range: Span,
-    },
     RefConstructor {
         init: Box<Expr>,
         range: Span,
@@ -253,7 +238,7 @@ impl Expr {
             Expr::FunAbstraction { range, .. } | Expr::Let { range, .. }
             | Expr::LetRec { range, .. } | Expr::Application { range, .. }
             | Expr::ConstructorApplication { range, .. } | Expr::Match { range, .. }
-            | Expr::IfThenElse { range, .. } | Expr::LetTuple { range, .. }
+            | Expr::IfThenElse { range, .. }
             | Expr::RefConstructor { range, .. } | Expr::Deref { range, .. }
             | Expr::Assign { range, .. } | Expr::Sequence { range, .. } => range,
         }
@@ -268,7 +253,7 @@ impl Expr {
             Expr::FunAbstraction { range, .. } | Expr::Let { range, .. }
             | Expr::LetRec { range, .. } | Expr::Application { range, .. }
             | Expr::ConstructorApplication { range, .. } | Expr::Match { range, .. }
-            | Expr::IfThenElse { range, .. } | Expr::LetTuple { range, .. }
+            | Expr::IfThenElse { range, .. }
             | Expr::RefConstructor { range, .. } | Expr::Deref { range, .. }
             | Expr::Assign { range, .. } | Expr::Sequence { range, .. } => *range = new_span,
         }
@@ -336,28 +321,12 @@ impl Expr {
             Expr::Match { scrutinee, cases, .. } => {
                 let mut all_free = scrutinee.free_vars();
                 for case in cases {
-                    match case {
-                        MatchCase::ConstructorCase { arg_var, when_cond, body, .. } => {
-                            let mut case_free = body.free_vars();
-                            case_free.remove(arg_var);
-                            all_free.extend(case_free);
-                            if let Some(cond) = when_cond {
-                                let mut cond_free = cond.free_vars();
-                                cond_free.remove(arg_var);
-                                all_free.extend(cond_free);
-                            }
-                        }
-                        MatchCase::CatchAllCase { var_name, when_cond, body, .. } => {
-                            let mut case_free = body.free_vars();
-                            case_free.remove(var_name);
-                            all_free.extend(case_free);
-                            if let Some(cond) = when_cond {
-                                let mut cond_free = cond.free_vars();
-                                cond_free.remove(var_name);
-                                all_free.extend(cond_free);
-                            }
-                        }
+                    let MatchCase { pat, when_cond, body, .. } = case;
+                    let mut case_free = body.free_vars();
+                    if let Some(cond) = when_cond {
+                        case_free.extend(cond.free_vars());
                     }
+                    all_free.extend(case_free.difference(&pat.bound_vars()).cloned());
                 }
                 all_free
             }
@@ -374,15 +343,6 @@ impl Expr {
                     all_free.extend(expr.free_vars());
                 }
                 all_free
-            }
-
-            Expr::LetTuple { component_vars, bind_to, body, .. } => {
-                let bound_names: HashSet<String> = component_vars.iter().cloned().collect();
-                let mut body_free = body.free_vars();
-                for name in &bound_names {
-                    body_free.remove(name);
-                }
-                bind_to.free_vars().union(&body_free).cloned().collect()
             }
 
             Expr::RefConstructor { init, .. } => init.free_vars(),
