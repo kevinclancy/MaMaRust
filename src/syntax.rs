@@ -27,6 +27,8 @@ pub enum Ty {
     SumTy {
         /// Maps each constructor name to its vec of fields
         variants: HashMap<String, Vec<(String, Ty)>>,
+        /// An ordering of all constructor names
+        variant_name_ord : Vec<String>,
         range: Span
     },
     IdTy { name: String, range: Span },
@@ -122,6 +124,21 @@ pub struct MatchCase {
     pub when_cond: Option<Box<Expr>>,
     pub body: Box<Expr>,
     pub range: Span
+}
+
+impl MatchCase {
+    /// If this case has an outer-level ConstructorApplication pattern then return
+    /// Some(n), where n is the constructor name as a string. Otherwise, return None.
+    pub fn get_variant_id(&self) -> Option<String> {
+        match &self.pat {
+            Pattern::ConstructorApplication { name, .. } => {
+                Some(name.clone())
+            },
+            _ => {
+                None
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -150,9 +150,12 @@ fn test_assign() {
 }
 
 #[test]
-#[ignore = "Requires pattern matching implementation"]
 fn test_match() {
-    run_test_prog("match Some 5 with | Some x -> x | None -> 0", 5);
+    run_test_prog(
+        "typedef Option = | Some {val : int} | None {} \
+         match Some {val : 5} with | Some {val : x} -> x | None {} -> 0",
+        5
+    );
 }
 
 #[test]
@@ -176,37 +179,35 @@ fn test_assign_add() {
 }
 
 #[test]
-#[ignore = "Requires pattern matching implementation"]
 fn test_match2() {
-    run_test_prog("match Some 42 with | Some x -> x | None -> 0", 42);
+    run_test_prog(
+        "typedef Option = | Some {val : int} | None {} \
+         match Some {val : 42} with | Some {val : x} -> x | None {} -> 0",
+        42
+    );
 }
 
 #[test]
-#[ignore = "Requires pattern matching implementation"]
 fn test_match3() {
     run_test_prog("match (1, 2) with | (x, y) -> x + y", 3);
 }
 
 #[test]
-#[ignore = "Requires pattern matching implementation"]
 fn test_match_guard_false() {
     run_test_prog("match 5 with | x when x > 10 -> 1 | _ -> 0", 0);
 }
 
 #[test]
-#[ignore = "Requires pattern matching implementation"]
 fn test_match_guard_true() {
     run_test_prog("match 15 with | x when x > 10 -> 1 | _ -> 0", 1);
 }
 
 #[test]
-#[ignore = "Requires pattern matching implementation"]
 fn test_match_fall_through() {
     run_test_prog("match 2 with | 1 -> 10 | 2 -> 20 | _ -> 30", 20);
 }
 
 #[test]
-#[ignore = "Requires pattern matching implementation"]
 fn test_match_catch_all_guard() {
     run_test_prog("match 5 with | x when x > 10 -> 1 | _ -> 0", 0);
 }

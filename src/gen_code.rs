@@ -1,4 +1,4 @@
-use crate::{code_builder::{add, get_basic, load_c, mk_basic, mk_vec, sub, symbolic_addr}, syntax::{Expr, Pattern, Prog, Span, Ty, Typedef, dummy_span}};
+use crate::{code_builder::{add, get_basic, load_c, mk_basic, mk_vec, sub, symbolic_addr}, syntax::{Expr, MatchCase, Pattern, Prog, Span, Ty, Typedef, dummy_span}};
 use im::{HashMap, Vector, vector};
 use crate::code_builder as instr;
 
@@ -88,6 +88,7 @@ pub fn process_typedefs(ctxt: &mut Context, typedefs: &[Typedef]) -> Result<(), 
         }).collect();
         let sum_ty = Ty::SumTy {
             variants: sum_variants,
+            variant_name_ord: typedef.variants.iter().map(|v| v.constructor_name.clone()).collect(),
             range: typedef.range.clone(),
         };
         ctxt.ty_ctxt = ctxt.ty_ctxt.update(typedef.typename.clone(), sum_ty);
@@ -496,6 +497,152 @@ pub fn code_v(
                 push_components_code + vector![mk_vec(n)]
             ))
         },
+        Expr::Match { scrutinee, cases, range } => {
+            let ctxt_inner = &Context { tail_pos: None, ..ctxt.clone() };
+            let (ty_scrut, code_scrut) = code_v(ctxt_inner, addr_gen, scrutinee, stack_level)?;
+            let after_addr = addr_gen.fresh_addr();
+
+            let is_sum_type = matches!(&ty_scrut, Ty::IdTy { name, .. } if {
+                matches!(ctxt.ty_ctxt.get(name), Some(Ty::SumTy { .. }))
+            });
+
+            let case_code = if is_sum_type {
+                let Ty::IdTy { name: ty_name, .. } = &ty_scrut else { unreachable!() };
+                let resolved_ty = ctxt.ty_ctxt.get(ty_name).unwrap().clone();
+                let Ty::SumTy { variant_name_ord, .. } = &resolved_ty else { unreachable!() };
+                let num_variants = variant_name_ord.len();
+
+                let mut variant_chains: Vec<Vec<(usize, &MatchCase)>> = vec![vec![]; num_variants];
+                let mut catch_all_chain: Vec<(usize, &MatchCase)> = vec![];
+                for (i, case) in cases.iter().enumerate() {
+                    match case.get_variant_id() {
+                        Some(ref ctor_name) => {
+                            let variant_idx = variant_name_ord.iter()
+                                .position(|n| n == ctor_name)
+                                .ok_or_else(|| {
+                                    (format!("constructor '{}' not found in type '{}'", ctor_name, ty_name), case.range.clone())
+                                })?;
+                            variant_chains[variant_idx].push((i, case));
+                        },
+                        None => {
+                            catch_all_chain.push((i, case));
+                        }
+                    }
+                }
+
+                let catch_all_start = addr_gen.fresh_addr();
+                let catch_all_labels: Vec<u16> = catch_all_chain.iter()
+                    .map(|_| addr_gen.fresh_addr())
+                    .collect();
+
+                let mut variant_start_labels: Vec<u16> = Vec::with_capacity(num_variants);
+                let mut variant_case_labels: Vec<Vec<u16>> = Vec::with_capacity(num_variants);
+                for chain in &variant_chains {
+                    if chain.is_empty() {
+                        variant_start_labels.push(catch_all_start);
+                        variant_case_labels.push(vec![]);
+                    } else {
+                        let labels: Vec<u16> = chain.iter().map(|_| addr_gen.fresh_addr()).collect();
+                        variant_start_labels.push(labels[0]);
+                        variant_case_labels.push(labels);
+                    }
+                }
+
+                let jump_table_addr = addr_gen.fresh_addr();
+                let mut code = vector![
+                    instr::push_loc(0),
+                    instr::tsum(jump_table_addr)
+                ];
+
+                let mut jump_table: Vector<i32> = vector![instr::symbolic_addr(jump_table_addr)];
+                for label in &variant_start_labels {
+                    jump_table = jump_table + vector![instr::jump(*label)];
+                }
+                code = code + jump_table;
+
+                let mut result_ty: Option<Ty> = None;
+
+                for (variant_idx, chain) in variant_chains.iter().enumerate() {
+                    for (j, (_, case)) in chain.iter().enumerate() {
+                        let fail = if j + 1 < chain.len() {
+                            variant_case_labels[variant_idx][j + 1]
+                        } else if !catch_all_chain.is_empty() {
+                            catch_all_labels[0]
+                        } else {
+                            ctxt.fail_addr
+                        };
+                        let (ty_body, case_code) = code_match_case(
+                            ctxt, addr_gen, case, &ty_scrut, fail, after_addr, stack_level
+                        )?;
+                        match &result_ty {
+                            None => result_ty = Some(ty_body),
+                            Some(prev_ty) => {
+                                if !Ty::is_equal(prev_ty, &ty_body) {
+                                    return Err(("match case body types must be equal".to_string(), case.range.clone()));
+                                }
+                            }
+                        }
+                        code = code + vector![instr::symbolic_addr(variant_case_labels[variant_idx][j])] + case_code;
+                    }
+                }
+
+                for (j, (_, case)) in catch_all_chain.iter().enumerate() {
+                    let fail = if j + 1 < catch_all_chain.len() {
+                        catch_all_labels[j + 1]
+                    } else {
+                        ctxt.fail_addr
+                    };
+                    let (ty_body, case_code) = code_match_case(
+                        ctxt, addr_gen, case, &ty_scrut, fail, after_addr, stack_level
+                    )?;
+                    match &result_ty {
+                        None => result_ty = Some(ty_body),
+                        Some(prev_ty) => {
+                            if !Ty::is_equal(prev_ty, &ty_body) {
+                                return Err(("match case body types must be equal".to_string(), case.range.clone()));
+                            }
+                        }
+                    }
+                    code = code + vector![instr::symbolic_addr(catch_all_labels[j])] + case_code;
+                }
+
+                let result_ty = result_ty.ok_or_else(|| {
+                    ("match expression must have at least one case".to_string(), range.clone())
+                })?;
+                Ok((result_ty, code))
+            } else {
+                let case_labels: Vec<u16> = cases.iter().map(|_| addr_gen.fresh_addr()).collect();
+                let mut code: Vector<i32> = Vector::new();
+                let mut result_ty: Option<Ty> = None;
+
+                for (j, case) in cases.iter().enumerate() {
+                    let fail = if j + 1 < cases.len() {
+                        case_labels[j + 1]
+                    } else {
+                        ctxt.fail_addr
+                    };
+                    let (ty_body, case_code) = code_match_case(
+                        ctxt, addr_gen, case, &ty_scrut, fail, after_addr, stack_level
+                    )?;
+                    match &result_ty {
+                        None => result_ty = Some(ty_body),
+                        Some(prev_ty) => {
+                            if !Ty::is_equal(prev_ty, &ty_body) {
+                                return Err(("match case body types must be equal".to_string(), case.range.clone()));
+                            }
+                        }
+                    }
+                    code = code + vector![instr::symbolic_addr(case_labels[j])] + case_code;
+                }
+
+                let result_ty = result_ty.ok_or_else(|| {
+                    ("match expression must have at least one case".to_string(), range.clone())
+                })?;
+                Ok((result_ty, code))
+            }?;
+
+            Ok((case_code.0, code_scrut + case_code.1 + vector![instr::symbolic_addr(after_addr)]))
+        },
         Expr::Let{ bound_pat, bind_to, body, .. } => {
             let (ty_bound, code_bound) = code_v(ctxt, addr_gen, bind_to, stack_level)?;
             let (pattern_code, ctxt_2, num_bindings) = code_pattern(
@@ -696,6 +843,71 @@ pub fn code_v(
 }
 
 
+/// Generates code for a single match case.
+///
+/// The scrutinee is at the top of the shadow stack (depth 0) at absolute level `stack_level + 1`.
+/// On pattern match failure (or guard failure), jumps to `fail_addr`.
+/// On success, evaluates the body, cleans up bindings + scrutinee, and jumps to `after_addr`.
+///
+/// Returns `(body_ty, code)`.
+fn code_match_case(
+    ctxt: &Context,
+    addr_gen: &mut AddressGenerator,
+    case: &MatchCase,
+    scrut_ty: &Ty,
+    fail_addr: u16,
+    after_addr: u16,
+    stack_level: u8
+) -> Result<(Ty, Vector<i32>), (String, Span)> {
+    let case_start = addr_gen.fresh_addr();
+    let (pattern_code, ctxt2, num_bindings) = code_pattern(
+        ctxt,
+        addr_gen,
+        &case.pat,
+        scrut_ty,
+        fail_addr,
+        0,
+        stack_level + 1,
+        stack_level + 1
+    )?;
+
+    let guard_code = match &case.when_cond {
+        Some(cond) => {
+            let guard_ok = addr_gen.fresh_addr();
+            let (ty_cond, code_cond) = code_b(
+                &Context { tail_pos: None, ..ctxt2.clone() },
+                addr_gen,
+                cond,
+                stack_level + 1 + num_bindings
+            )?;
+            match ty_cond {
+                Ty::IntTy(_) => {},
+                _ => return Err(("expected guard condition to have type 'int'".to_string(), cond.range().clone()))
+            }
+            code_cond + vector![
+                instr::jump_nz(guard_ok),
+                instr::slide(num_bindings, 0),
+                instr::jump(fail_addr),
+                instr::symbolic_addr(guard_ok)
+            ]
+        },
+        None => vector![]
+    };
+
+    let (ty_body, code_body) = code_v(&ctxt2, addr_gen, &case.body, stack_level + 1 + num_bindings)?;
+
+    let code = vector![instr::symbolic_addr(case_start)]
+        + pattern_code
+        + guard_code
+        + code_body
+        + vector![
+            instr::slide(num_bindings + 1, 1),
+            instr::jump(after_addr)
+        ];
+
+    Ok((ty_body, code))
+}
+
 /// Returns a triple (`code`, `ctxt2`, `num_pushed`) where
 ///
 /// * `code` pushes pattern-variable-bound values onto the stack and falls through on match,
@@ -734,7 +946,7 @@ pub fn code_pattern(
                 instr::load_c(*n),
                 instr::eq(),
                 instr::jump_nz(success_addr),
-                instr::slide(stack_level - base_stack_level + 1, 0),
+                instr::slide(stack_level - base_stack_level, 0),
                 instr::jump(fail_addr),
                 instr::symbolic_addr(success_addr)
             ];
