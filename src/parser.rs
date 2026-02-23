@@ -139,10 +139,8 @@ pub fn pattern_parser() -> impl Parser<Token, Pattern, Error = Simple<Token>> + 
                     .map_with_span(|name, span| Pattern::Var(name, span)),
                 select! { Token::Int(n) => n }
                     .map_with_span(|n, span| Pattern::Int(n, span)),
-                just(Token::LParen)
-                    .ignore_then(select! { Token::Constructor(name) => name })
+                select! { Token::Constructor(name) => name }
                     .then(fields)
-                    .then_ignore(just(Token::RParen))
                     .map_with_span(|(name, fields), span| Pattern::ConstructorApplication {
                         name,
                         fields: fields.into_iter().map(|(key, pat, span)| (key, (pat, span))).collect(),
@@ -302,10 +300,8 @@ pub fn expr_parser() -> impl Parser<Token, Expr, Error = Simple<Token>> + Clone 
             .delimited_by(just(Token::LBrack), just(Token::RBrack));
 
         // Constructor application: (Constructor {f1 : e1, f2 : e2})
-        let constructor_app = just(Token::LParen)
-            .ignore_then(select! { Token::Constructor(name) => name })
+        let constructor_app = select! { Token::Constructor(name) => name }
             .then(fields)
-            .then_ignore(just(Token::RParen))
             .map_with_span(|(name, fields), span| Expr::ConstructorApplication {
                 name,
                 fields: fields,
@@ -709,7 +705,7 @@ mod tests {
 
     #[test]
     fn test_parse_constructor_application() {
-        let result = parse_expr("(Some {x : 42})");
+        let result = parse_expr("Some {x : 42}");
         assert!(result.is_ok());
         match result.unwrap() {
             Expr::ConstructorApplication { name, fields, .. } => {
@@ -978,7 +974,7 @@ mod tests {
 
     #[test]
     fn test_parse_constructor_pattern_no_fields() {
-        let result = parse_expr("let (None {}) = x in 1");
+        let result = parse_expr("let None {} = x in 1");
         assert!(result.is_ok());
         match result.unwrap() {
             Expr::Let { bound_pat, .. } => {
@@ -997,7 +993,7 @@ mod tests {
 
     #[test]
     fn test_parse_constructor_pattern_one_field() {
-        let result = parse_expr("let (Some {val : x}) = e in x");
+        let result = parse_expr("let Some {val : x} = e in x");
         assert!(result.is_ok());
         match result.unwrap() {
             Expr::Let { bound_pat, .. } => {
@@ -1020,7 +1016,7 @@ mod tests {
 
     #[test]
     fn test_parse_constructor_pattern_multiple_fields() {
-        let result = parse_expr("let (Pair {fst : a, snd : b}) = e in a + b");
+        let result = parse_expr("let Pair {fst : a, snd : b} = e in a + b");
         assert!(result.is_ok());
         match result.unwrap() {
             Expr::Let { bound_pat, .. } => {
@@ -1040,7 +1036,7 @@ mod tests {
 
     #[test]
     fn test_parse_constructor_pattern_nested() {
-        let result = parse_expr("let (Some {val : (a, b)}) = e in a + b");
+        let result = parse_expr("let Some {val : (a, b)} = e in a + b");
         assert!(result.is_ok());
         match result.unwrap() {
             Expr::Let { bound_pat, .. } => {

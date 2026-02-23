@@ -215,7 +215,7 @@ fn test_match_catch_all_guard() {
 fn test_let_constructor_pattern() {
     run_test_prog(
         "typedef Option = | Some {val : int} | None {} \
-         let (Some {val : x}) = (Some {val : 42}) in x",
+         let Some {val : x} = Some {val : 42} in x",
         42
     );
 }
@@ -224,7 +224,7 @@ fn test_let_constructor_pattern() {
 fn test_let_constructor_pattern_add_fields() {
     run_test_prog(
         "typedef Pair = | MkPair {fst : int, snd : int} \
-         let (MkPair {fst : a, snd : b}) = (MkPair {fst : 3, snd : 4}) in a + b",
+         let MkPair {fst : a, snd : b} = MkPair {fst : 3, snd : 4} in a + b",
         7
     );
 }
@@ -233,7 +233,7 @@ fn test_let_constructor_pattern_add_fields() {
 fn test_let_constructor_pattern_tuple_fields() {
     run_test_prog(
         "typedef Pair = | MkPair {fst : (int, int, int), snd : (int, int, int)} \
-         let (MkPair {fst : (a, b, c), snd : (d, e, f)}) = (MkPair {fst : (1, 2, 3), snd : (4, 5, 6)}) in a + b + c + d + e + f",
+         let MkPair {fst : (a, b, c), snd : (d, e, f)} = MkPair {fst : (1, 2, 3), snd : (4, 5, 6)} in a + b + c + d + e + f",
         21
     );
 }
@@ -242,7 +242,7 @@ fn test_let_constructor_pattern_tuple_fields() {
 fn test_let_constructor_nested_tuple() {
     run_test_prog(
         "typedef Wrapper = | Wrap {val : (int, int)} \
-         let (Wrap {val : (x, y)}) = (Wrap {val : (10, 20)}) in x + y",
+         let Wrap {val : (x, y)} = Wrap {val : (10, 20)} in x + y",
         30
     );
 }
