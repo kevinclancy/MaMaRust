@@ -761,7 +761,7 @@ pub fn code_v(
                 Ty::RefTy { contained_ty, .. } => {
                     if !Ty::is_equal(&*contained_ty, &new_val_ty) {
                         return Err((
-                            format!("expected lhs to have type Ref {} but instead had type {}", new_val_ty, ref_expr_ty),
+                            format!("expected lhs to have type Ref {} but instead had type Ref {}", new_val_ty, ref_expr_ty),
                             range.clone()
                         ));
                     }

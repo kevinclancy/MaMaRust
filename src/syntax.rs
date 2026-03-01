@@ -31,23 +31,33 @@ pub enum Ty {
         variant_name_ord : Vec<String>,
         range: Span
     },
+    /// a type identifier that refers to a type defined in a module
     IdTy { name: String, range: Span },
+    /// a parameter to a type function, e.g. 'a
+    VarTy { name: String, range: Span },
+    TyFunTy { dom: Vec<String>, cod:Box<Ty>, range: Span },
+    TyAppTy { args: Vec<Box<Ty>>, ty_fn: Box<Ty>, range: Span  }
 }
 
 impl Ty {
     /// Type equality that ignores ranges
     pub fn is_equal(&self, other: &Ty) -> bool {
+        self.alpha_equal(other, &HashMap::new())
+    }
+
+    /// Checks alpha equivalence under a renaming of type variables from self to other
+    fn alpha_equal(&self, other: &Ty, renaming: &HashMap<&str, &str>) -> bool {
         match (self, other) {
             (Ty::IntTy(_), Ty::IntTy(_)) => true,
             (Ty::FunTy { dom: dom_a, cod: cod_a, .. }, Ty::FunTy { dom: dom_b, cod: cod_b, .. }) => {
-                dom_a.is_equal(dom_b) && cod_a.is_equal(cod_b)
+                dom_a.alpha_equal(dom_b, renaming) && cod_a.alpha_equal(cod_b, renaming)
             }
             (Ty::ProdTy { components: comp_a, .. }, Ty::ProdTy { components: comp_b, .. }) => {
                 comp_a.len() == comp_b.len() &&
-                comp_a.iter().zip(comp_b.iter()).all(|(a, b)| a.is_equal(b))
+                comp_a.iter().zip(comp_b.iter()).all(|(a, b)| a.alpha_equal(b, renaming))
             }
             (Ty::RefTy { contained_ty: ty_a, .. }, Ty::RefTy { contained_ty: ty_b, .. }) => {
-                ty_a.is_equal(ty_b)
+                ty_a.alpha_equal(ty_b, renaming)
             }
             (Ty::SumTy { variants: var_a, .. }, Ty::SumTy { variants: var_b, .. }) => {
                 var_a.len() == var_b.len() &&
@@ -55,13 +65,33 @@ impl Ty {
                     var_b.get(name).map_or(false, |fields_b| {
                         fields_a.len() == fields_b.len() &&
                         fields_a.iter().zip(fields_b.iter()).all(|((name_a, ty_a), (name_b, ty_b))| {
-                            name_a == name_b && ty_a.is_equal(ty_b)
+                            name_a == name_b && ty_a.alpha_equal(ty_b, renaming)
                         })
                     })
                 })
             }
-            (Ty::IdTy { name: name_a, .. }, Ty::IdTy { name: name_b, .. }) => {
+            (Ty::IdTy { name:name_a, ..}, Ty::IdTy { name:name_b, ..}) => {
                 name_a == name_b
+            }
+            (Ty::VarTy { name: name_a, .. }, Ty::IdTy { name: name_b, .. }) => {
+                match renaming.get(name_a.as_str()) {
+                    Some(renamed) => *renamed == name_b.as_str(),
+                    None => name_a == name_b,
+                }
+            }
+            (Ty::TyAppTy { args: args_a, ty_fn: fn_a, .. }, Ty::TyAppTy { args: args_b, ty_fn: fn_b, .. }) => {
+                args_a.len() == args_b.len() &&
+                fn_a.alpha_equal(fn_b, renaming) &&
+                args_a.iter().zip(args_b.iter()).all(|(a, b)| a.alpha_equal(b, renaming))
+            }
+            (Ty::TyFunTy { dom: dom_a, cod: cod_a, .. }, Ty::TyFunTy { dom: dom_b, cod: cod_b, .. }) => {
+                dom_a.len() == dom_b.len() && {
+                    let mut extended = renaming.clone();
+                    for (a, b) in dom_a.iter().zip(dom_b.iter()) {
+                        extended.insert(a.as_str(), b.as_str());
+                    }
+                    cod_a.alpha_equal(cod_b, &extended)
+                }
             }
             _ => false,
         }
@@ -101,6 +131,14 @@ impl fmt::Display for Ty {
             Ty::RefTy { contained_ty, .. } => write!(f, "Ref {}", contained_ty),
             Ty::SumTy { .. } => write!(f, "sumTy"),
             Ty::IdTy { name, .. } => write!(f, "{}", name),
+            Ty::VarTy { name, .. } => write!(f, "{}", name),
+            Ty::TyFunTy { dom, cod, .. } => {
+                write!(f, "({}) {}", dom.join(", "), cod)
+            },
+            Ty::TyAppTy { args, ty_fn, .. } => {
+                let arg_strs: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+                write!(f, "{} [{}]", ty_fn, arg_strs.join(", "))
+            }
         }
     }
 }
