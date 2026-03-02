@@ -1,4 +1,4 @@
-use crate::{code_builder::{add, get_basic, load_c, mk_basic, mk_vec, sub, symbolic_addr}, syntax::{Expr, MatchCase, Pattern, Prog, Span, Ty, Typedef, dummy_span}};
+use crate::{code_builder::{add, get_basic, load_c, mk_basic, mk_vec, sub, symbolic_addr}, ident::Ident, syntax::{Expr, MatchCase, Pattern, Prog, Span, Ty, Typedef, dummy_span}};
 use im::{HashMap, Vector, vector};
 use crate::code_builder as instr;
 
@@ -41,15 +41,21 @@ pub struct VarContextEntry {
     /// The address of the variable
     pub address: Address,
     /// The type of the value bound to the variable
-    pub ty: Ty,
+    pub ty: Ty<Ident>,
+}
+
+#[derive(Debug, Clone)]
+enum TyContextEntry {
+    Transparent { def: Ty<Ident> },
+    Opaque
 }
 
 #[derive(Debug, Clone)]
 pub struct ConstructorSig {
     /// Field names and types in the order they appear in the typedef declaration
-    fields : Vec<(String, Ty)>,
+    fields : Vec<(String, Ty<Ident>)>,
     /// The name of the discriminated union type being constructed
-    ty_id : String,
+    ty_id : Ident,
     /// An integer that identifies that variant among all variants of type `ty_id`
     variant_id : u16
 }
@@ -59,11 +65,14 @@ pub struct ConstructorSig {
 #[derive(Debug, Clone)]
 pub struct Context {
     /// Maps each variable name in context to its address and type
-    pub var_ctxt: HashMap<String, VarContextEntry>,
-    pub ty_ctxt: HashMap<String, Ty>,
+    pub var_ctxt: HashMap<Ident, VarContextEntry>,
+    /// Maps each type variable name in context to its definition
+    pub ty_ctxt: HashMap<Ident, TyContextEntry>,
+    /// Maps each constructor name in context to its signature
     pub constructor_ctxt: HashMap<String, ConstructorSig>,
     /// Some(n) if we're in tail position in an n-parameter function definition, None otherwise
     pub tail_pos: Option<u8>,
+    /// "panic" address to jump to when a programmer error has been discovered, e.g. when destructuring fails
     pub fail_addr: u16
 }
 
@@ -80,20 +89,20 @@ impl Context {
 }
 
 /// Process a list of typedefs, registering each type and its constructors in the context.
-pub fn process_typedefs(ctxt: &mut Context, typedefs: &[Typedef]) -> Result<(), (String, Span)> {
+pub fn process_typedefs(ctxt: &mut Context, typedefs: &[Typedef<Ident>]) -> Result<(), (String, Span)> {
     for typedef in typedefs {
-        let sum_variants: std::collections::HashMap<String, Vec<(String, Ty)>> = typedef.variants.iter().map(|v| {
-            let fields: Vec<(String, Ty)> = v.fields.iter().map(|(name, ty, _)| (name.clone(), ty.clone())).collect();
+        let sum_variants: std::collections::HashMap<String, Vec<(String, Ty<Ident>)>> = typedef.variants.iter().map(|v| {
+            let fields: Vec<(String, Ty<Ident>)> = v.fields.iter().map(|(name, ty, _)| (name.clone(), ty.clone())).collect();
             (v.constructor_name.clone(), fields)
         }).collect();
         let sum_ty = Ty::SumTy {
             variants: sum_variants,
             variant_name_ord: typedef.variants.iter().map(|v| v.constructor_name.clone()).collect(),
-            range: typedef.range.clone(),
+            range: typedef.span.clone(),
         };
-        ctxt.ty_ctxt = ctxt.ty_ctxt.update(typedef.typename.clone(), sum_ty);
+        ctxt.ty_ctxt = ctxt.ty_ctxt.update(typedef.typename.clone(), TyContextEntry::Transparent { def: sum_ty });
         for (i, variant) in typedef.variants.iter().enumerate() {
-            let fields: Vec<(String, Ty)> = variant.fields.iter().map(|(name, ty, _)| {
+            let fields: Vec<(String, Ty<Ident>)> = variant.fields.iter().map(|(name, ty, _)| {
                 (name.clone(), ty.clone())
             }).collect();
             let sig = ConstructorSig {
@@ -109,7 +118,7 @@ pub fn process_typedefs(ctxt: &mut Context, typedefs: &[Typedef]) -> Result<(), 
 
 /// Generate code for a complete program: process typedefs to build the context,
 /// then generate code for the body expression.
-pub fn gen_code_prog(prog: &Prog) -> Result<(Ty, Vector<i32>), (String, Span)> {
+pub fn gen_code_prog(prog: &Prog<Ident>) -> Result<(Ty<Ident>, Vector<i32>), (String, Span)> {
     let mut addr_gen = AddressGenerator::new();
     let fail_addr = addr_gen.fresh_addr();
     let fail_code = vector![instr::symbolic_addr(fail_addr), instr::halt()];
@@ -125,10 +134,10 @@ pub fn gen_code_prog(prog: &Prog) -> Result<(Ty, Vector<i32>), (String, Span)> {
 /// If `var_name` is not in context, generate a type-checking error using the `Err` variant.
 pub fn get_var(
     ctxt: &Context,
-    var_name: &str,
+    var_name: &Ident,
     var_rng: &Span,
     stack_level: u8,
-) -> Result<(Ty, i32), (String, Span)> {
+) -> Result<(Ty<Ident>, i32), (String, Span)> {
     match ctxt.var_ctxt.get(var_name) {
         Some(VarContextEntry{ address: Address::Local(i), ty }) => {
             Ok((
@@ -159,21 +168,21 @@ pub fn get_var(
 pub fn bin_op_b(
     ctxt: &Context,
     addr_gen: &mut AddressGenerator,
-    e1: &Expr,
-    e2: &Expr,
+    e1: &Expr<Ident>,
+    e2: &Expr<Ident>,
     instr: i32,
     stack_level: u8,
-) -> Result<(Ty, Vector<i32>), (String, Span)> {
+) -> Result<(Ty<Ident>, Vector<i32>), (String, Span)> {
     let ctxt_prime = Context { tail_pos: None, ..ctxt.clone() };
     let (ty1, code1) = code_b(&ctxt_prime, addr_gen, e1, stack_level)?;
     let (ty2, code2) = code_b(&ctxt_prime, addr_gen, e2, stack_level)?;
     match ty1 {
         Ty::IntTy(_) => { },
-        _ => { return Err(("Expected lhs to have type 'int'".to_string(), e1.range().clone())); }
+        _ => { return Err(("Expected lhs to have type 'int'".to_string(), e1.span().clone())); }
     };
     match ty2 {
         Ty::IntTy(_) => { },
-        _ => { return Err(("Expected rhs to have type 'int'".to_string(), e2.range().clone())); }
+        _ => { return Err(("Expected rhs to have type 'int'".to_string(), e2.span().clone())); }
     };
     Ok((
         Ty::IntTy(0..0),
@@ -191,11 +200,11 @@ pub fn bin_op_b(
 pub fn bin_op_v(
     ctxt: &Context,
     addr_gen: &mut AddressGenerator,
-    e1: &Expr,
-    e2: &Expr,
+    e1: &Expr<Ident>,
+    e2: &Expr<Ident>,
     instr: i32,
     stack_level: u8,
-) -> Result<(Ty, Vector<i32>), (String, Span)> {
+) -> Result<(Ty<Ident>, Vector<i32>), (String, Span)> {
     let (ty, code) = bin_op_b(ctxt, addr_gen, e1, e2, instr, stack_level)?;
     Ok((
         ty,
@@ -208,9 +217,9 @@ pub fn bin_op_v(
 pub fn code_c(
     ctxt: &Context,
     addr_gen: &mut AddressGenerator,
-    expr: &Expr,
+    expr: &Expr<Ident>,
     stack_level: u8,
-) -> Result<(Ty, Vector<i32>), String> {
+) -> Result<(Ty<Ident>, Vector<i32>), String> {
     panic!("code_c not implemented")
 }
 
@@ -221,9 +230,9 @@ pub fn code_c(
 pub fn code_b(
     ctxt: &Context,
     addr_gen: &mut AddressGenerator,
-    expr: &Expr,
+    expr: &Expr<Ident>,
     stack_level: u8,
-) -> Result<(Ty, Vector<i32>), (String, Span)> {
+) -> Result<(Ty<Ident>, Vector<i32>), (String, Span)> {
     match expr {
         Expr::Int(n, _) => {
             Ok((
@@ -266,10 +275,10 @@ pub fn code_b(
             let (ty_else, code_else) = code_b(ctxt, addr_gen, else_expr, stack_level)?;
             match ty_cond {
                 Ty::IntTy(_) => { },
-                _ => { return Err(("expected condition to have type 'int'".to_string(), cond.range().clone())); }
+                _ => { return Err(("expected condition to have type 'int'".to_string(), cond.span().clone())); }
             }
             if !Ty::is_equal(&ty_then, &ty_else) {
-                return Err(("expected 'then' and 'else' branch to have equal types".to_string(), expr.range().clone()));
+                return Err(("expected 'then' and 'else' branch to have equal types".to_string(), expr.span().clone()));
             }
             let else_addr = addr_gen.fresh_addr();
             let after_addr = addr_gen.fresh_addr();
@@ -287,7 +296,7 @@ pub fn code_b(
                 )
             ))
         },
-        Expr::FunAbstraction{formals:_, body:_, range:_} =>
+        Expr::FunAbstraction{formals:_, body:_, span:_} =>
             panic!("functions do not produce basic values"),
         _ => {
             let (ty, code) = code_v(ctxt, addr_gen, expr, stack_level)?;
@@ -305,9 +314,9 @@ pub fn code_b(
 pub fn code_v(
     ctxt: &Context,
     addr_gen: &mut AddressGenerator,
-    expr: &Expr,
+    expr: &Expr<Ident>,
     stack_level: u8,
-) -> Result<(Ty, Vector<i32>), (String, Span)> {
+) -> Result<(Ty<Ident>, Vector<i32>), (String, Span)> {
     match expr {
         Expr::Int(n, _) => {
             Ok((
@@ -350,10 +359,10 @@ pub fn code_v(
             let (ty_else, code_else) = code_v(ctxt, addr_gen, else_expr, stack_level)?;
             match ty_cond {
                 Ty::IntTy(_) => { },
-                _ => { return Err(("expected condition to have type 'int'".to_string(), cond.range().clone())); }
+                _ => { return Err(("expected condition to have type 'int'".to_string(), cond.span().clone())); }
             }
             if !Ty::is_equal(&ty_then, &ty_else) {
-                return Err(("expected 'then' and 'else' branch to have equal types".to_string(), expr.range().clone()));
+                return Err(("expected 'then' and 'else' branch to have equal types".to_string(), expr.span().clone()));
             }
             let else_addr = addr_gen.fresh_addr();
             let after_addr = addr_gen.fresh_addr();
@@ -370,10 +379,10 @@ pub fn code_v(
                 )
             ))
         },
-        Expr::FunAbstraction { formals, body, range } => {
-            let free_var_list : Vec<String> = expr.free_vars().iter().cloned().collect();
-            let global_vars : Vec<(Ty, i32)> = free_var_list.iter().enumerate().map(
-                |(i, var)| get_var(ctxt, var, range, stack_level + (i as u8))
+        Expr::FunAbstraction { formals, body, span } => {
+            let free_var_list : Vec<Ident> = expr.free_vars().iter().cloned().collect();
+            let global_vars : Vec<(Ty<Ident>, i32)> = free_var_list.iter().enumerate().map(
+                |(i, var)| get_var(ctxt, var, span, stack_level + (i as u8))
             ).collect::<Result<Vec<_>, _>>()?;
             let push_globals : Vector<i32> = global_vars.iter().map(|(_, instr)| *instr).collect();
             let execute_body_addr = addr_gen.fresh_addr();
@@ -401,7 +410,7 @@ pub fn code_v(
                 Ty::FunTy {
                     dom: Box::new(formal.ty.clone()),
                     cod: Box::new(acc),
-                    range: 0..0
+                    span: 0..0
                 }
             });
             Ok((
@@ -427,7 +436,7 @@ pub fn code_v(
             let num_admin_elems = match ctxt.tail_pos { Some(_) => 0u8, None => 1u8 };
             let (ty_fun, code_fun) =
                 code_v(ctxt, addr_gen, fn_expr, stack_level + (args.len() as u8) + num_admin_elems)?;
-            let ty_code_args: Vec<(Ty, Vector<i32>)> = args.iter().enumerate().map(
+            let ty_code_args: Vec<(Ty<Ident>, Vector<i32>)> = args.iter().enumerate().map(
                 |(i, e)|
                     code_v(
                         &Context { tail_pos: None, ..ctxt.clone() },
@@ -438,14 +447,14 @@ pub fn code_v(
             ).collect::<Result<Vec<_>, _>>()?;
             let formal_tys = ty_fun.dom_ty_list();
             if formal_tys.len() < ty_code_args.len() {
-                return Err(("expected applied expression to have function type".to_string(), fn_expr.range().clone()))
+                return Err(("expected applied expression to have function type".to_string(), fn_expr.span().clone()))
             }
-            let used_formal_tys : Vec<Ty> = formal_tys.iter().take(ty_code_args.len()).cloned().collect();
+            let used_formal_tys : Vec<Ty<Ident>> = formal_tys.iter().take(ty_code_args.len()).cloned().collect();
             for i in 0..ty_code_args.len() {
                 let (actual_ty, _) = &ty_code_args[i];
                 let formal_ty = &used_formal_tys[i];
                 if !Ty::is_equal(actual_ty, formal_ty) {
-                    return Err(("argument type mismatch".to_string(), args[i].range().clone()));
+                    return Err(("argument type mismatch".to_string(), args[i].span().clone()));
                 }
             }
             let arg_codes: Vector<i32> = ty_code_args.iter().rev().fold(
@@ -484,7 +493,7 @@ pub fn code_v(
             }
         },
         Expr::Tuple(exprs, _) => {
-            let (component_tys, component_codes) : (Vec<Ty>, Vec<Vector<i32>>) = exprs.iter().enumerate().map(
+            let (component_tys, component_codes) : (Vec<Ty<Ident>>, Vec<Vector<i32>>) = exprs.iter().enumerate().map(
                 |(i, expr)| {
                     let (ty, code) = code_v(ctxt, addr_gen, expr, stack_level + (i as u8))?;
                     Ok((ty, code))
@@ -493,34 +502,34 @@ pub fn code_v(
             let n = component_codes.len() as u16;
             let push_components_code : Vector<i32> = component_codes.into_iter().sum();
             Ok((
-                Ty::ProdTy { components: component_tys, range: dummy_span() },
+                Ty::ProdTy { components: component_tys, span: dummy_span() },
                 push_components_code + vector![mk_vec(n)]
             ))
         },
-        Expr::Match { scrutinee, cases, range } => {
+        Expr::Match { scrutinee, cases, span } => {
             let ctxt_inner = &Context { tail_pos: None, ..ctxt.clone() };
             let (ty_scrut, code_scrut) = code_v(ctxt_inner, addr_gen, scrutinee, stack_level)?;
             let after_addr = addr_gen.fresh_addr();
 
             let is_sum_type = matches!(&ty_scrut, Ty::IdTy { name, .. } if {
-                matches!(ctxt.ty_ctxt.get(name), Some(Ty::SumTy { .. }))
+                matches!(ctxt.ty_ctxt.get(name), Some(TyContextEntry::Transparent{ def: Ty::SumTy { .. }}))
             });
 
             let case_code = if is_sum_type {
                 let Ty::IdTy { name: ty_name, .. } = &ty_scrut else { unreachable!() };
                 let resolved_ty = ctxt.ty_ctxt.get(ty_name).unwrap().clone();
-                let Ty::SumTy { variant_name_ord, .. } = &resolved_ty else { unreachable!() };
+                let TyContextEntry::Transparent { def: Ty::SumTy { variant_name_ord, .. } } =
+                    &resolved_ty else { unreachable!() };
                 let num_variants = variant_name_ord.len();
-
-                let mut variant_chains: Vec<Vec<(usize, &MatchCase)>> = vec![vec![]; num_variants];
-                let mut catch_all_chain: Vec<(usize, &MatchCase)> = vec![];
+                let mut variant_chains: Vec<Vec<(usize, &MatchCase<Ident>)>> = vec![vec![]; num_variants];
+                let mut catch_all_chain: Vec<(usize, &MatchCase<Ident>)> = vec![];
                 for (i, case) in cases.iter().enumerate() {
                     match case.get_variant_id() {
                         Some(ref ctor_name) => {
                             let variant_idx = variant_name_ord.iter()
                                 .position(|n| n == ctor_name)
                                 .ok_or_else(|| {
-                                    (format!("constructor '{}' not found in type '{}'", ctor_name, ty_name), case.range.clone())
+                                    (format!("constructor '{}' not found in type '{}'", ctor_name, ty_name), case.span.clone())
                                 })?;
                             variant_chains[variant_idx].push((i, case));
                         },
@@ -560,7 +569,7 @@ pub fn code_v(
                 }
                 code = code + jump_table;
 
-                let mut result_ty: Option<Ty> = None;
+                let mut result_ty: Option<Ty<Ident>> = None;
 
                 for (variant_idx, chain) in variant_chains.iter().enumerate() {
                     for (j, (_, case)) in chain.iter().enumerate() {
@@ -578,7 +587,7 @@ pub fn code_v(
                             None => result_ty = Some(ty_body),
                             Some(prev_ty) => {
                                 if !Ty::is_equal(prev_ty, &ty_body) {
-                                    return Err(("match case body types must be equal".to_string(), case.range.clone()));
+                                    return Err(("match case body types must be equal".to_string(), case.span.clone()));
                                 }
                             }
                         }
@@ -599,7 +608,7 @@ pub fn code_v(
                         None => result_ty = Some(ty_body),
                         Some(prev_ty) => {
                             if !Ty::is_equal(prev_ty, &ty_body) {
-                                return Err(("match case body types must be equal".to_string(), case.range.clone()));
+                                return Err(("match case body types must be equal".to_string(), case.span.clone()));
                             }
                         }
                     }
@@ -607,13 +616,13 @@ pub fn code_v(
                 }
 
                 let result_ty = result_ty.ok_or_else(|| {
-                    ("match expression must have at least one case".to_string(), range.clone())
+                    ("match expression must have at least one case".to_string(), span.clone())
                 })?;
                 Ok((result_ty, code))
             } else {
                 let case_labels: Vec<u16> = cases.iter().map(|_| addr_gen.fresh_addr()).collect();
                 let mut code: Vector<i32> = Vector::new();
-                let mut result_ty: Option<Ty> = None;
+                let mut result_ty: Option<Ty<Ident>> = None;
 
                 for (j, case) in cases.iter().enumerate() {
                     let fail = if j + 1 < cases.len() {
@@ -628,7 +637,7 @@ pub fn code_v(
                         None => result_ty = Some(ty_body),
                         Some(prev_ty) => {
                             if !Ty::is_equal(prev_ty, &ty_body) {
-                                return Err(("match case body types must be equal".to_string(), case.range.clone()));
+                                return Err(("match case body types must be equal".to_string(), case.span.clone()));
                             }
                         }
                     }
@@ -636,7 +645,7 @@ pub fn code_v(
                 }
 
                 let result_ty = result_ty.ok_or_else(|| {
-                    ("match expression must have at least one case".to_string(), range.clone())
+                    ("match expression must have at least one case".to_string(), span.clone())
                 })?;
                 Ok((result_ty, code))
             }?;
@@ -680,7 +689,7 @@ pub fn code_v(
                     ..acc_ctxt
                 }
             });
-            let binding_codes: Vec<(Ty, Vector<i32>)> = bindings.iter()
+            let binding_codes: Vec<(Ty<Ident>, Vector<i32>)> = bindings.iter()
                 .map(|(_, ascribed_ty, bound_expr)| {
                     let (synthesized_ty, bound_code) = code_v(
                         &Context { tail_pos: None, ..ctxt_prime.clone() },
@@ -692,7 +701,7 @@ pub fn code_v(
                     if !Ty::is_equal(&synthesized_ty, ascribed_ty) {
                         return Err((
                             format!("ascribed type does not match synthesized type"),
-                            bound_expr.range().clone()
+                            bound_expr.span().clone()
                         ));
                     }
 
@@ -719,11 +728,11 @@ pub fn code_v(
                 stack_level
             )?;
             Ok((
-                Ty::RefTy { contained_ty: Box::new(init_ty), range: 0..0 },
+                Ty::RefTy { contained_ty: Box::new(init_ty), span: 0..0 },
                 init_code + vector![instr::mk_ref()]
             ))
         },
-        Expr::Deref { ref_expr, range } => {
+        Expr::Deref { ref_expr, span } => {
             let (ref_expr_ty, ref_expr_code) = code_v(
                 &Context { tail_pos: None, ..ctxt.clone() },
                 addr_gen,
@@ -735,7 +744,7 @@ pub fn code_v(
                 _ => {
                     return Err((
                         format!("Expected {:?} to have a reference type but instead found {}", ref_expr, ref_expr_ty),
-                        range.clone()
+                        span.clone()
                     ));
                 }
             };
@@ -744,7 +753,7 @@ pub fn code_v(
                 ref_expr_code + vector![instr::get_ref()]
             ))
         },
-        Expr::Assign { ref_expr, new_val, range } => {
+        Expr::Assign { ref_expr, new_val, span } => {
             let (new_val_ty, new_val_code) = code_v(
                 &Context { tail_pos: None, ..ctxt.clone() },
                 addr_gen,
@@ -762,31 +771,31 @@ pub fn code_v(
                     if !Ty::is_equal(&*contained_ty, &new_val_ty) {
                         return Err((
                             format!("expected lhs to have type Ref {} but instead had type Ref {}", new_val_ty, ref_expr_ty),
-                            range.clone()
+                            span.clone()
                         ));
                     }
                 },
                 _ => {
                     return Err((
                         format!("expected lhs to have reference type but instead had type {}", ref_expr_ty),
-                        range.clone()
+                        span.clone()
                     ));
                 }
             }
             Ok((
-                Ty::ProdTy{ components: vec![], range: 0..0 },
+                Ty::ProdTy{ components: vec![], span: 0..0 },
                 new_val_code + ref_expr_code + vector![instr::ref_assign()]
             ))
         },
-        Expr::ConstructorApplication { name, fields, range } => {
+        Expr::ConstructorApplication { name, fields, span } => {
             let sig = ctxt.constructor_ctxt.get(name).ok_or_else(|| {
-                (format!("unknown constructor '{}'", name), range.clone())
+                (format!("unknown constructor '{}'", name), span.clone())
             })?;
             let sig = sig.clone();
             if fields.len() != sig.fields.len() {
                 return Err((
                     format!("constructor '{}' expects {} fields, got {}", name, sig.fields.len(), fields.len()),
-                    range.clone()
+                    span.clone()
                 ));
             }
             let mut field_codes: Vector<i32> = Vector::new();
@@ -812,7 +821,7 @@ pub fn code_v(
                 field_codes = field_codes + code;
             }
             Ok((
-                Ty::IdTy { name: sig.ty_id.clone(), range: 0..0 },
+                Ty::IdTy { name: sig.ty_id.clone(), span: 0..0 },
                 field_codes + vector![mk_vec(fields.len() as u16), instr::mk_sum(sig.variant_id)]
             ))
         }
@@ -829,7 +838,7 @@ pub fn code_v(
                 _ => {
                     return Err((
                         "expected first expression to have unit type".to_string(),
-                        first.range().clone()
+                        first.span().clone()
                     ));
                 }
             }
@@ -853,12 +862,12 @@ pub fn code_v(
 fn code_match_case(
     ctxt: &Context,
     addr_gen: &mut AddressGenerator,
-    case: &MatchCase,
-    scrut_ty: &Ty,
+    case: &MatchCase<Ident>,
+    scrut_ty: &Ty<Ident>,
     fail_addr: u16,
     after_addr: u16,
     stack_level: u8
-) -> Result<(Ty, Vector<i32>), (String, Span)> {
+) -> Result<(Ty<Ident>, Vector<i32>), (String, Span)> {
     let case_start = addr_gen.fresh_addr();
     let (pattern_code, ctxt2, num_bindings) = code_pattern(
         ctxt,
@@ -882,7 +891,7 @@ fn code_match_case(
             )?;
             match ty_cond {
                 Ty::IntTy(_) => {},
-                _ => return Err(("expected guard condition to have type 'int'".to_string(), cond.range().clone()))
+                _ => return Err(("expected guard condition to have type 'int'".to_string(), cond.span().clone()))
             }
             code_cond + vector![
                 instr::jump_nz(guard_ok),
@@ -921,8 +930,8 @@ fn code_match_case(
 pub fn code_pattern(
     ctxt: &Context,
     addr_gen: &mut AddressGenerator,
-    pat: &Pattern,
-    scrut_ty: &Ty,
+    pat: &Pattern<Ident>,
+    scrut_ty: &Ty<Ident>,
     fail_addr: u16,
     scrut_depth: u8,
     base_stack_level: u8,
@@ -992,9 +1001,15 @@ pub fn code_pattern(
 
             let resolved_scrut_ty = match scrut_ty {
                 Ty::IdTy { name: ty_name, .. } => {
-                    ctxt.ty_ctxt.get(ty_name).ok_or_else(|| {
+                    let ty_ctxt_entry = ctxt.ty_ctxt.get(ty_name).ok_or_else(|| {
                         (format!("unknown type '{}'", ty_name), span.clone())
-                    })?.clone()
+                    })?.clone();
+                    match ty_ctxt_entry {
+                        TyContextEntry::Transparent { def } => def,
+                        TyContextEntry::Opaque => {
+                            return Err(("expected scrutinee to have sum type".to_string(), span.clone()))
+                        }
+                    }
                 },
                 other => other.clone()
             };

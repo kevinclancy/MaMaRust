@@ -1,4 +1,4 @@
-use mama_rust::syntax::{Ty, Expr};
+use mama_rust::syntax::{Expr, Prog, Ty};
 use mama_rust::gen_code::{code_v, gen_code_prog, AddressGenerator, Context};
 use mama_rust::exec::execute;
 use mama_rust::virtual_machine::{from_instructions};
@@ -30,7 +30,8 @@ use mama_rust::{address_resolution, code_builder};
 
 fn run_test_prog(prog_str: &str, expected_result: i32) {
     let prog = parse_prog(prog_str).unwrap();
-    let (ty, code) = gen_code_prog(&prog).unwrap();
+    let prog2 = Prog::stamp_ids(&prog).unwrap();
+    let (ty, code) = gen_code_prog(&prog2).unwrap();
 
     let mut code_vec : Vec<i32> = code.into_iter().collect();
     code_vec.push(code_builder::halt());
