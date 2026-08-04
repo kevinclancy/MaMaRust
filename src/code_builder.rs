@@ -104,6 +104,31 @@ pub fn mk_vec(n: u16) -> i32 {
     op_id | ((n as i32) << 8)
 }
 
+/// Replaces the vector on top of the stack with its element at index `i`, unlike
+/// `get_vec`, which explodes every element of the vector onto the stack
+pub fn get_vec_i(i: u16) -> i32 {
+    let op_id = 0x2B;
+    op_id | ((i as i32) << 8)
+}
+
+/// Allocates a module table of `n` null slots and installs it in the module pointer
+pub fn alloc_mod_table(n: u16) -> i32 {
+    let op_id = 0x2C;
+    op_id | ((n as i32) << 8)
+}
+
+/// Pushes the `i`th module value onto the stack
+pub fn push_mod(i: u16) -> i32 {
+    let op_id = 0x2D;
+    op_id | ((i as i32) << 8)
+}
+
+/// Pops the value on top of the stack and stores it in slot `i` of the module table
+pub fn set_mod(i: u16) -> i32 {
+    let op_id = 0x2E;
+    op_id | ((i as i32) << 8)
+}
+
 pub fn mk_fun_val(addr: u16) -> i32 {
     let op_id = 0x18;
     op_id | ((addr as i32) << 8)

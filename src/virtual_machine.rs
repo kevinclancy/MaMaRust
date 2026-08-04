@@ -17,6 +17,10 @@ pub struct VirtualMachine {
   pub ssp: usize,
   /// Globals pointer
   pub gp: HeapAddr,
+  /// Module pointer: the vector of top-level module values, indexed by `PushMod`.
+  /// Kept separate from `gp`, which is scoped to the running closure, because a module
+  /// must be reachable from every call frame without being captured by any closure
+  pub mp: HeapAddr,
   /// Frame pointer
   pub fp: usize
 }
@@ -45,6 +49,7 @@ pub fn from_file(file_name : &str) -> VirtualMachine {
     ss: Vec::from([0 as u32; MAX_STACK_MEM/4]),
     ssp: 0,
     gp: 0,
+    mp: 0,
     fp: 0,
     instructions: f,
     pc: 0
@@ -59,6 +64,7 @@ pub fn from_instructions(instructions: Vec<i32>) -> VirtualMachine {
     ss: Vec::from([0 as u32; MAX_STACK_MEM/4]),
     ssp: 0,
     gp: 0,
+    mp: 0,
     fp: 0,
     instructions,
     pc: 0
@@ -68,6 +74,6 @@ pub fn from_instructions(instructions: Vec<i32>) -> VirtualMachine {
 impl VirtualMachine {
   /// All the VM's current root addresses for garbage collection
   pub fn roots(&mut self) -> impl Iterator<Item = &mut HeapAddr> {
-    self.ss[0..self.ssp+1].iter_mut().chain([&mut self.gp])
+    self.ss[0..self.ssp+1].iter_mut().chain([&mut self.gp, &mut self.mp])
   }
 }

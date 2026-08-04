@@ -1,4 +1,4 @@
-use crate::{code_builder::{add, get_basic, load_c, mk_basic, mk_vec, sub, symbolic_addr}, ident::Ident, syntax::{Expr, MatchCase, Pattern, Prog, Span, Ty, Typedef, dummy_span}};
+use crate::{code_builder::{add, get_basic, load_c, mk_basic, mk_vec, sub, symbolic_addr}, ident::Ident, syntax::{Expr, FieldDef, Kind, MatchCase, ModuleTerm, Path, Pattern, Prog, Span, Ty, SumTypeDef, dummy_span}};
 use im::{HashMap, Vector, vector};
 use crate::code_builder as instr;
 
@@ -6,11 +6,13 @@ use crate::code_builder as instr;
 pub struct AddressGenerator {
     /// The next address to generate
     next_addr: u16,
+    /// The next module table index to generate
+    next_mod_index: u16,
 }
 
 impl AddressGenerator {
     pub fn new() -> Self {
-        AddressGenerator { next_addr: 0 }
+        AddressGenerator { next_addr: 0, next_mod_index: 0 }
     }
 
     /// Returns a symbolic address that is unique from all other symbolic addresses that
@@ -19,6 +21,19 @@ impl AddressGenerator {
         let addr = self.next_addr;
         self.next_addr += 1;
         addr
+    }
+
+    /// Returns a module table index that is unique from all other module table indices
+    /// that have been returned by this `AddressGenerator`
+    pub fn fresh_mod_index(&mut self) -> u16 {
+        let index = self.next_mod_index;
+        self.next_mod_index += 1;
+        index
+    }
+
+    /// The number of module table indices generated so far
+    pub fn num_mod_indices(&self) -> u16 {
+        self.next_mod_index
     }
 }
 
@@ -45,12 +60,6 @@ pub struct VarContextEntry {
 }
 
 #[derive(Debug, Clone)]
-enum TyContextEntry {
-    Transparent { def: Ty<Ident> },
-    Opaque
-}
-
-#[derive(Debug, Clone)]
 pub struct ConstructorSig {
     /// Field names and types in the order they appear in the typedef declaration
     fields : Vec<(String, Ty<Ident>)>,
@@ -60,14 +69,90 @@ pub struct ConstructorSig {
     variant_id : u16
 }
 
+/// What a single module component declares. Mirrors the `FieldDef` variants of the
+/// structure it came from
+#[derive(Debug, Clone)]
+pub enum SigComponent {
+    /// a type component, whose kind determines whether it is transparent
+    /// (a singleton) or abstract (`Star`)
+    Ty { kind: Kind<Ident> },
+    /// a term component, its type, and its index in the module's runtime vector.
+    /// The index counts only components with runtime content, so it differs from the
+    /// component's position in `Signature::components` whenever types precede it
+    Val { ty: Ty<Ident>, index: u16 },
+    /// a submodule, its signature, and its index in the enclosing module's vector;
+    /// a submodule occupies a single slot holding its own vector
+    Mod { sig: Signature, index: u16 },
+}
+
+/// The components a module exports, as a telescope: each component may refer to those
+/// preceding it, so the order is semantically significant and not merely a convention
+/// for deterministic code generation
+#[derive(Debug, Clone)]
+pub struct Signature {
+    /// the exported components, in declaration order
+    pub components: Vec<(String, SigComponent)>,
+}
+
+impl Signature {
+    /// Looks up a component by the name it is exported under. Components are a sequence of
+    /// bindings rather than a set, so a module may export the same name more than once; the
+    /// last such component shadows the earlier ones, matching how a reference inside the
+    /// module resolves
+    pub fn lookup(&self, field: &str) -> Option<&SigComponent> {
+        self.components.iter()
+            .rev()
+            .find(|(name, _)| name == field)
+            .map(|(_, component)| component)
+    }
+
+    /// The type and runtime slot index of a term component. Code generation reaches the
+    /// runtime layout only through this and `lookup_mod_layout`, so that separating a
+    /// signature into its static and dynamic parts later need not touch every call site
+    pub fn lookup_val_layout(&self, field: &str) -> Option<(&Ty<Ident>, u16)> {
+        match self.lookup(field)? {
+            SigComponent::Val { ty, index } => Some((ty, *index)),
+            _ => None,
+        }
+    }
+
+    /// The signature and runtime slot index of a submodule component
+    pub fn lookup_mod_layout(&self, field: &str) -> Option<(&Signature, u16)> {
+        match self.lookup(field)? {
+            SigComponent::Mod { sig, index } => Some((sig, *index)),
+            _ => None,
+        }
+    }
+}
+
+/// Where a module's runtime vector lives. Only static addresses exist for now; functor
+/// parameters and modules bound inside a function body will need a stack-local case
+#[derive(Debug, Clone)]
+pub enum ModAddress {
+    /// `Static(i)` is the `i`th entry of the module table, which is installed once at
+    /// program start and reachable from every call frame without closure capture
+    Static(u16),
+}
+
+#[derive(Debug, Clone)]
+pub struct ModContextEntry {
+    /// What the module exports
+    pub sig: Signature,
+    /// The address of the module's runtime vector
+    pub address: ModAddress,
+}
+
 /// Contextual information relevant to a position in source code.
 /// This includes types of bound variables and other things.
 #[derive(Debug, Clone)]
 pub struct Context {
     /// Maps each variable name in context to its address and type
     pub var_ctxt: HashMap<Ident, VarContextEntry>,
-    /// Maps each type variable name in context to its definition
-    pub ty_ctxt: HashMap<Ident, TyContextEntry>,
+    /// Maps each type name in context to its kind; a singleton kind carries the
+    /// definition of a transparent type, while `Star` marks an abstract one
+    pub ty_ctxt: HashMap<Ident, Kind<Ident>>,
+    /// Maps each module identifier in context to its signature and address
+    pub module_ctxt: HashMap<Ident, ModContextEntry>,
     /// Maps each constructor name in context to its signature
     pub constructor_ctxt: HashMap<String, ConstructorSig>,
     /// Some(n) if we're in tail position in an n-parameter function definition, None otherwise
@@ -81,51 +166,301 @@ impl Context {
         Context {
             var_ctxt: HashMap::new(),
             ty_ctxt: HashMap::new(),
+            module_ctxt: HashMap::new(),
             constructor_ctxt: HashMap::new(),
             tail_pos: None,
             fail_addr
         }
     }
+
+    /// Resolves a dotted path to the kind of the type it names, looking the root up
+    /// in scope and then walking into the signature of each module prefix in turn
+    pub fn resolve_ty_path(&self, path: &Path<Ident>) -> Result<&Kind<Ident>, (String, Span)> {
+        match path {
+            Path::RootId { id, span } => {
+                self.ty_ctxt.get(id).ok_or_else(|| {
+                    (format!("unbound type identifier: {}", id), span.clone())
+                })
+            },
+            Path::Select { prefix, field, span } => {
+                match self.resolve_module_path(prefix)?.lookup(field) {
+                    Some(SigComponent::Ty { kind }) => Ok(kind),
+                    Some(_) => Err((
+                        format!("component {} of module {} is not a type", field, prefix),
+                        span.clone()
+                    )),
+                    None => Err((
+                        format!("module {} has no type component {}", prefix, field),
+                        span.clone()
+                    )),
+                }
+            }
+        }
+    }
+
+    /// Resolves a dotted path to the signature of the module it names
+    pub fn resolve_module_path(&self, path: &Path<Ident>) -> Result<&Signature, (String, Span)> {
+        match path {
+            Path::RootId { id, span } => {
+                self.module_ctxt.get(id).map(|entry| &entry.sig).ok_or_else(|| {
+                    (format!("unbound module identifier: {}", id), span.clone())
+                })
+            },
+            Path::Select { prefix, field, span } => {
+                match self.resolve_module_path(prefix)?.lookup_mod_layout(field) {
+                    Some((sig, _)) => Ok(sig),
+                    None => Err((
+                        format!("module {} has no submodule {}", prefix, field),
+                        span.clone()
+                    )),
+                }
+            }
+        }
+    }
+
+    /// The address of the module table entry a path's root identifier denotes
+    pub fn resolve_mod_root_address(&self, id: &Ident, span: &Span)
+        -> Result<&ModAddress, (String, Span)>
+    {
+        self.module_ctxt.get(id).map(|entry| &entry.address).ok_or_else(|| {
+            (format!("unbound module identifier: {}", id), span.clone())
+        })
+    }
+
+    /// Follows a path to the sum type it transparently names. Returns None when the
+    /// path names an abstract type or a type that is not a sum, since in neither case
+    /// are the variants visible here
+    pub fn resolve_sum_ty(&self, path: &Path<Ident>) -> Result<Option<&Ty<Ident>>, (String, Span)> {
+        match self.resolve_ty_path(path)? {
+            Kind::Singleton { ty, .. } => Ok(match &**ty {
+                sum @ Ty::SumTy { .. } => Some(sum),
+                _ => None,
+            }),
+            _ => Ok(None),
+        }
+    }
+}
+
+/// Register one sum type and its constructors in the context, binding the type name at
+/// singleton kind since a typedef is always transparent where it is written
+fn register_sum_typedef(ctxt: &mut Context, typedef: &SumTypeDef<Ident>) {
+    let sum_variants: std::collections::HashMap<String, Vec<(String, Ty<Ident>)>> = typedef.variants.iter().map(|v| {
+        let fields: Vec<(String, Ty<Ident>)> = v.fields.iter().map(|(name, ty, _)| (name.clone(), ty.clone())).collect();
+        (v.constructor_name.clone(), fields)
+    }).collect();
+    let sum_ty = Ty::SumTy {
+        variants: sum_variants,
+        variant_name_ord: typedef.variants.iter().map(|v| v.constructor_name.clone()).collect(),
+        range: typedef.span.clone(),
+    };
+    ctxt.ty_ctxt = ctxt.ty_ctxt.update(
+        typedef.typename.clone(),
+        Kind::Singleton { ty: Box::new(sum_ty), span: typedef.span.clone() }
+    );
+    for (i, variant) in typedef.variants.iter().enumerate() {
+        let fields: Vec<(String, Ty<Ident>)> = variant.fields.iter().map(|(name, ty, _)| {
+            (name.clone(), ty.clone())
+        }).collect();
+        let sig = ConstructorSig {
+            fields,
+            ty_id: typedef.typename.clone(),
+            variant_id: i as u16,
+        };
+        ctxt.constructor_ctxt = ctxt.constructor_ctxt.update(variant.constructor_name.clone(), sig);
+    }
 }
 
 /// Process a list of typedefs, registering each type and its constructors in the context.
-pub fn process_typedefs(ctxt: &mut Context, typedefs: &[Typedef<Ident>]) -> Result<(), (String, Span)> {
+pub fn process_typedefs(ctxt: &mut Context, typedefs: &[SumTypeDef<Ident>]) -> Result<(), (String, Span)> {
     for typedef in typedefs {
-        let sum_variants: std::collections::HashMap<String, Vec<(String, Ty<Ident>)>> = typedef.variants.iter().map(|v| {
-            let fields: Vec<(String, Ty<Ident>)> = v.fields.iter().map(|(name, ty, _)| (name.clone(), ty.clone())).collect();
-            (v.constructor_name.clone(), fields)
-        }).collect();
-        let sum_ty = Ty::SumTy {
-            variants: sum_variants,
-            variant_name_ord: typedef.variants.iter().map(|v| v.constructor_name.clone()).collect(),
-            range: typedef.span.clone(),
-        };
-        ctxt.ty_ctxt = ctxt.ty_ctxt.update(typedef.typename.clone(), TyContextEntry::Transparent { def: sum_ty });
-        for (i, variant) in typedef.variants.iter().enumerate() {
-            let fields: Vec<(String, Ty<Ident>)> = variant.fields.iter().map(|(name, ty, _)| {
-                (name.clone(), ty.clone())
-            }).collect();
-            let sig = ConstructorSig {
-                fields,
-                ty_id: typedef.typename.clone(),
-                variant_id: i as u16,
-            };
-            ctxt.constructor_ctxt = ctxt.constructor_ctxt.update(variant.constructor_name.clone(), sig);
-        }
+        register_sum_typedef(ctxt, typedef);
     }
     Ok(())
 }
 
-/// Generate code for a complete program: process typedefs to build the context,
-/// then generate code for the body expression.
+/// Generate code that constructs a module's value and stores it in the module table,
+/// along with the signature describing what it exports and the table index it occupies.
+///
+/// A structure's components are telescoping: each is compiled in a context containing the
+/// bindings of its predecessors, so the components with runtime content accumulate as
+/// consecutive stack slots, exactly as a chain of nested `let`s would. Those slots are
+/// then packaged into a single vector. Type components contribute only to the compile-time
+/// context, so they occupy no slot.
+pub fn code_module(
+    ctxt: &Context,
+    addr_gen: &mut AddressGenerator,
+    module: &ModuleTerm<Ident>,
+    stack_level: u8,
+) -> Result<(Signature, u16, Vector<i32>), (String, Span)> {
+    match module {
+        ModuleTerm::ModulePath { path, .. } => {
+            let sig = ctxt.resolve_module_path(path)?.clone();
+            let mod_index = addr_gen.fresh_mod_index();
+            let code = code_module_path(ctxt, path)?
+                + vector![instr::set_mod(mod_index)];
+            Ok((sig, mod_index, code))
+        },
+        ModuleTerm::Mod { fields, .. } => {
+            let mut inner_ctxt = ctxt.clone();
+            let mut components: Vec<(String, SigComponent)> = Vec::new();
+            let mut code: Vector<i32> = vector![];
+            let mut num_slots: u16 = 0;
+
+            for field in fields {
+                match field {
+                    FieldDef::ValDef { id, expr, .. } => {
+                        let (ty, field_code) = code_v(
+                            &inner_ctxt,
+                            addr_gen,
+                            expr,
+                            stack_level + num_slots as u8
+                        )?;
+                        code = code + field_code;
+                        inner_ctxt.var_ctxt = inner_ctxt.var_ctxt.update(id.clone(), VarContextEntry {
+                            address: Address::Local(stack_level as i16 + num_slots as i16 + 1),
+                            ty: ty.clone(),
+                        });
+                        components.push((id.name.clone(), SigComponent::Val { ty, index: num_slots }));
+                        num_slots += 1;
+                    },
+                    FieldDef::TyDef { id, ty, span } => {
+                        let kind = Kind::Singleton { ty: Box::new(ty.clone()), span: span.clone() };
+                        inner_ctxt.ty_ctxt = inner_ctxt.ty_ctxt.update(id.clone(), kind.clone());
+                        components.push((id.name.clone(), SigComponent::Ty { kind }));
+                    },
+                    FieldDef::SumTypeDef { def } => {
+                        register_sum_typedef(&mut inner_ctxt, def);
+                        let kind = inner_ctxt.ty_ctxt.get(&def.typename).unwrap().clone();
+                        components.push((def.typename.name.clone(), SigComponent::Ty { kind }));
+                    },
+                    FieldDef::ModDef { id, module: submodule, .. } => {
+                        let (sub_sig, sub_index, sub_code) = code_module(
+                            &inner_ctxt,
+                            addr_gen,
+                            submodule,
+                            stack_level + num_slots as u8
+                        )?;
+                        code = code + sub_code + vector![instr::push_mod(sub_index)];
+                        inner_ctxt.module_ctxt = inner_ctxt.module_ctxt.update(id.clone(), ModContextEntry {
+                            sig: sub_sig.clone(),
+                            address: ModAddress::Static(sub_index),
+                        });
+                        components.push((id.name.clone(), SigComponent::Mod { sig: sub_sig, index: num_slots }));
+                        num_slots += 1;
+                    }
+                }
+            }
+
+            let mod_index = addr_gen.fresh_mod_index();
+            code = code + vector![mk_vec(num_slots)];
+            code = code + vector![instr::set_mod(mod_index)];
+            Ok((Signature { components }, mod_index, code))
+        }
+    }
+}
+
+/// Generate code that pushes the module value a path denotes onto the stack
+fn code_module_path(
+    ctxt: &Context,
+    path: &Path<Ident>,
+) -> Result<Vector<i32>, (String, Span)> {
+    match path {
+        Path::RootId { id, span } => {
+            match ctxt.resolve_mod_root_address(id, span)? {
+                ModAddress::Static(i) => Ok(vector![instr::push_mod(*i)]),
+            }
+        },
+        Path::Select { prefix, field, span } => {
+            let index = match ctxt.resolve_module_path(prefix)?.lookup_mod_layout(field) {
+                Some((_, index)) => index,
+                None => return Err((
+                    format!("module {} has no submodule {}", prefix, field),
+                    span.clone()
+                )),
+            };
+            let prefix_code = code_module_path(ctxt, prefix)?;
+            Ok(prefix_code + vector![instr::get_vec_i(index)])
+        }
+    }
+}
+
+/// Generate code that pushes the value of a term component selected from a module
+pub fn code_val_path(
+    ctxt: &Context,
+    path: &Path<Ident>,
+) -> Result<(Ty<Ident>, Vector<i32>), (String, Span)> {
+    let Path::Select { prefix, field, span } = path else {
+        return Err((format!("'{}' is not a module component", path), path.span().clone()));
+    };
+    let (ty, index) = match ctxt.resolve_module_path(prefix)?.lookup_val_layout(field) {
+        Some((ty, index)) => (ty.clone(), index),
+        None => return Err((
+            format!("module {} has no value component {}", field, prefix),
+            span.clone()
+        )),
+    };
+    let prefix_code = code_module_path(ctxt, prefix)?;
+    Ok((ty, prefix_code + vector![instr::get_vec_i(index), instr::eval()]))
+}
+
+/// Generate code that allocates a module table of `num_modules` null slots and installs
+/// it in the module pointer. Generates no code when `num_modules` is zero
+fn code_mod_table_setup(num_modules: u16) -> Vector<i32> {
+    if num_modules == 0 {
+        return vector![];
+    }
+    vector![instr::alloc_mod_table(num_modules)]
+}
+
+/// Generate code for a complete program: build the module its components define, then
+/// apply that module's `run` component to the unit value. Returns the type of the result,
+/// which is the return type of `run`
 pub fn gen_code_prog(prog: &Prog<Ident>) -> Result<(Ty<Ident>, Vector<i32>), (String, Span)> {
     let mut addr_gen = AddressGenerator::new();
     let fail_addr = addr_gen.fresh_addr();
     let fail_code = vector![instr::symbolic_addr(fail_addr), instr::halt()];
-    let mut ctxt = Context::new(fail_addr);
-    process_typedefs(&mut ctxt, &prog.typedefs)?;
-    let (ty, code) = code_v(&ctxt, &mut addr_gen, &prog.expr, 0)?;
-    Ok((ty, code + fail_code))
+    let ctxt = Context::new(fail_addr);
+
+    let prog_module = ModuleTerm::Mod {
+        fields: prog.fields.clone(),
+        span: prog.span.clone(),
+    };
+    let (sig, mod_index, module_code) = code_module(&ctxt, &mut addr_gen, &prog_module, 0)?;
+
+    let Some((run_ty, run_index)) = sig.lookup_val_layout("run") else {
+        return Err((
+            "a program must define a value component named 'run'".to_string(),
+            prog.span.clone()
+        ));
+    };
+    let Ty::FunTy { dom, cod, .. } = run_ty else {
+        return Err((
+            format!("'run' must have type () -> int, but has type {}", run_ty),
+            prog.span.clone()
+        ));
+    };
+    let unit_ty = Ty::ProdTy { components: vec![], span: dummy_span() };
+    if !dom.is_equal(&unit_ty) || !cod.is_equal(&Ty::IntTy(dummy_span())) {
+        return Err((
+            format!("'run' must have type () -> int, but has type {}", run_ty),
+            prog.span.clone()
+        ));
+    }
+    let result_ty = (**cod).clone();
+
+    let after_addr = addr_gen.fresh_addr();
+    let call_run_code = vector![
+        instr::mark(after_addr),
+        instr::mk_vec(0),
+        instr::push_mod(mod_index),
+        instr::get_vec_i(run_index),
+        instr::eval(),
+        instr::apply(),
+        instr::symbolic_addr(after_addr)
+    ];
+
+    let setup_code = code_mod_table_setup(addr_gen.num_mod_indices());
+    Ok((result_ty, setup_code + module_code + call_run_code + fail_code))
 }
 
 /// If the variable `var_name` is in context, return its type and an instruction
@@ -299,7 +634,12 @@ pub fn code_b(
         Expr::FunAbstraction{formals:_, body:_, span:_} =>
             panic!("functions do not produce basic values"),
         _ => {
-            let (ty, code) = code_v(ctxt, addr_gen, expr, stack_level)?;
+            let (ty, code) = code_v(
+                &Context { tail_pos: None, ..ctxt.clone() },
+                addr_gen,
+                expr,
+                stack_level
+            )?;
             Ok((
                 ty,
                 code + vector![instr::get_basic()]
@@ -433,9 +773,20 @@ pub fn code_v(
             ))
         },
         Expr::Application { fn_expr, args, .. } => {
-            let num_admin_elems = match ctxt.tail_pos { Some(_) => 0u8, None => 1u8 };
-            let (ty_fun, code_fun) =
-                code_v(ctxt, addr_gen, fn_expr, stack_level + (args.len() as u8) + num_admin_elems)?;
+            // a call reuses the enclosing frame only when it is in tail position *and*
+            // supplies exactly as many arguments as the enclosing function has formals;
+            // otherwise a mark is emitted, occupying one admin slot beneath the arguments
+            let tail_formals = match ctxt.tail_pos {
+                Some(num_formals) if args.len() == num_formals as usize => Some(num_formals),
+                _ => None,
+            };
+            let num_admin_elems: u8 = if tail_formals.is_some() { 0 } else { 1 };
+            let (ty_fun, code_fun) = code_v(
+                &Context { tail_pos: None, ..ctxt.clone() },
+                addr_gen,
+                fn_expr,
+                stack_level + (args.len() as u8) + num_admin_elems
+            )?;
             let ty_code_args: Vec<(Ty<Ident>, Vector<i32>)> = args.iter().enumerate().map(
                 |(i, e)|
                     code_v(
@@ -461,8 +812,8 @@ pub fn code_v(
                 Vector::new(),
                 |acc, (_, code)| acc + code.clone()
             );
-            match ctxt.tail_pos {
-                Some(num_formals) if ty_code_args.len() == num_formals as usize => {
+            match tail_formals {
+                Some(num_formals) => {
                     Ok((
                         ty_fun.apply(args.len()),
                         (
@@ -475,7 +826,7 @@ pub fn code_v(
                         )
                     ))
                 },
-                _ => {
+                None => {
                     let after_addr = addr_gen.fresh_addr();
                     Ok((
                         ty_fun.apply(args.len()),
@@ -495,7 +846,12 @@ pub fn code_v(
         Expr::Tuple(exprs, _) => {
             let (component_tys, component_codes) : (Vec<Ty<Ident>>, Vec<Vector<i32>>) = exprs.iter().enumerate().map(
                 |(i, expr)| {
-                    let (ty, code) = code_v(ctxt, addr_gen, expr, stack_level + (i as u8))?;
+                    let (ty, code) = code_v(
+                        &Context { tail_pos: None, ..ctxt.clone() },
+                        addr_gen,
+                        expr,
+                        stack_level + (i as u8)
+                    )?;
                     Ok((ty, code))
                 }
             ).collect::<Result<Vec<_>, _>>()?.into_iter().unzip();
@@ -511,15 +867,13 @@ pub fn code_v(
             let (ty_scrut, code_scrut) = code_v(ctxt_inner, addr_gen, scrutinee, stack_level)?;
             let after_addr = addr_gen.fresh_addr();
 
-            let is_sum_type = matches!(&ty_scrut, Ty::IdTy { name, .. } if {
-                matches!(ctxt.ty_ctxt.get(name), Some(TyContextEntry::Transparent{ def: Ty::SumTy { .. }}))
-            });
+            let scrut_sum_ty = match &ty_scrut {
+                Ty::IdTy { path, .. } => ctxt.resolve_sum_ty(path)?.map(|sum| (path, sum.clone())),
+                _ => None,
+            };
 
-            let case_code = if is_sum_type {
-                let Ty::IdTy { name: ty_name, .. } = &ty_scrut else { unreachable!() };
-                let resolved_ty = ctxt.ty_ctxt.get(ty_name).unwrap().clone();
-                let TyContextEntry::Transparent { def: Ty::SumTy { variant_name_ord, .. } } =
-                    &resolved_ty else { unreachable!() };
+            let case_code = if let Some((ty_name, sum_ty)) = &scrut_sum_ty {
+                let Ty::SumTy { variant_name_ord, .. } = sum_ty else { unreachable!() };
                 let num_variants = variant_name_ord.len();
                 let mut variant_chains: Vec<Vec<(usize, &MatchCase<Ident>)>> = vec![vec![]; num_variants];
                 let mut catch_all_chain: Vec<(usize, &MatchCase<Ident>)> = vec![];
@@ -559,7 +913,6 @@ pub fn code_v(
 
                 let jump_table_addr = addr_gen.fresh_addr();
                 let mut code = vector![
-                    instr::push_loc(0),
                     instr::tsum(jump_table_addr)
                 ];
 
@@ -653,7 +1006,12 @@ pub fn code_v(
             Ok((case_code.0, code_scrut + case_code.1 + vector![instr::symbolic_addr(after_addr)]))
         },
         Expr::Let{ bound_pat, bind_to, body, .. } => {
-            let (ty_bound, code_bound) = code_v(ctxt, addr_gen, bind_to, stack_level)?;
+            let (ty_bound, code_bound) = code_v(
+                &Context { tail_pos: None, ..ctxt.clone() },
+                addr_gen,
+                bind_to,
+                stack_level
+            )?;
             let (pattern_code, ctxt_2, num_bindings) = code_pattern(
                 ctxt,
                 addr_gen,
@@ -667,7 +1025,7 @@ pub fn code_v(
             let (ty_body, code_body) = code_v(&ctxt_2, addr_gen, body, stack_level + 1 + num_bindings)?;
             Ok((
                 ty_body,
-                code_bound + pattern_code + code_body + vector![instr::slide(1, num_bindings + 1)]
+                code_bound + pattern_code + code_body + vector![instr::slide(num_bindings + 1, 1)]
             ))
         },
         Expr::Var(name, rng) => {
@@ -677,6 +1035,7 @@ pub fn code_v(
                 vector![push_var_instr, instr::eval()]
             ))
         },
+        Expr::ValPath { path, .. } => code_val_path(ctxt, path),
         Expr::LetRec { bindings, body, .. } => {
             let n = bindings.len();
             let ctxt_prime = bindings.iter().enumerate().fold(ctxt.clone(), |acc_ctxt, (i, (name, ty, _))| {
@@ -821,7 +1180,10 @@ pub fn code_v(
                 field_codes = field_codes + code;
             }
             Ok((
-                Ty::IdTy { name: sig.ty_id.clone(), span: 0..0 },
+                Ty::IdTy {
+                    path: Path::RootId { id: sig.ty_id.clone(), span: dummy_span() },
+                    span: 0..0
+                },
                 field_codes + vector![mk_vec(fields.len() as u16), instr::mk_sum(sig.variant_id)]
             ))
         }
@@ -1000,13 +1362,10 @@ pub fn code_pattern(
             })?.clone();
 
             let resolved_scrut_ty = match scrut_ty {
-                Ty::IdTy { name: ty_name, .. } => {
-                    let ty_ctxt_entry = ctxt.ty_ctxt.get(ty_name).ok_or_else(|| {
-                        (format!("unknown type '{}'", ty_name), span.clone())
-                    })?.clone();
-                    match ty_ctxt_entry {
-                        TyContextEntry::Transparent { def } => def,
-                        TyContextEntry::Opaque => {
+                Ty::IdTy { path, .. } => {
+                    match ctxt.resolve_ty_path(path)?.clone() {
+                        Kind::Singleton { ty, .. } => *ty,
+                        _ => {
                             return Err(("expected scrutinee to have sum type".to_string(), span.clone()))
                         }
                     }
@@ -1033,9 +1392,9 @@ pub fn code_pattern(
                 instr::slide(stack_level - base_stack_level + 1, 0),
                 instr::jump(fail_addr),
                 instr::symbolic_addr(success_addr),
-                instr::push_loc(scrut_depth as i16),
                 instr::tget_constructor_arg(),
-                instr::get_vec()
+                instr::get_vec(),
+                instr::slide(1, sig.fields.len() as u8)
             ];
 
             let n = sig.fields.len() as u8;

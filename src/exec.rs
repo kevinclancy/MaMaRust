@@ -405,6 +405,37 @@ pub fn execute(vm: &mut VirtualMachine) -> i32 {
             vm.s[vm.sp] = variant_id as i32;
             vm.pc += 1;
           },
+          0x2B => { // GetVecI(i)
+            let i : usize = ((instr & 0x00FFFF00) >> 8).try_into().unwrap();
+            println!("GetVecI {i}");
+            let elems = heap.expect_vector(vm.ss[vm.ssp]);
+            assert!(i < elems.len());
+            vm.ss[vm.ssp] = elems[i];
+            vm.pc += 1;
+          },
+          0x2C => { // AllocModTable(n)
+            let n : usize = ((instr & 0x00FFFF00) >> 8).try_into().unwrap();
+            println!("AllocModTable {n}");
+            let nulls = vec![0; n];
+            vm.mp = heap.new_vector(&nulls[..], vm.roots());
+            vm.pc += 1;
+          },
+          0x2D => { // PushMod(i)
+            let i : usize = ((instr & 0x00FFFF00) >> 8).try_into().unwrap();
+            println!("PushMod {i}");
+            let modules = heap.expect_vector(vm.mp);
+            assert!(i < modules.len());
+            vm.ss[vm.ssp + 1] = modules[i];
+            vm.ssp += 1;
+            vm.pc += 1;
+          },
+          0x2E => { // SetMod(i)
+            let i : usize = ((instr & 0x00FFFF00) >> 8).try_into().unwrap();
+            println!("SetMod {i}");
+            heap.set_vector_elem(vm.mp, i, vm.ss[vm.ssp]);
+            vm.ssp -= 1;
+            vm.pc += 1;
+          },
           _ => panic!("invalid instruction")
       }
   }

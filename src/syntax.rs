@@ -18,6 +18,73 @@ pub fn dummy_span() -> Span {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum Path<Id> {
+    /// a lexically-scoped identifier, for a module, type, or term
+    RootId{id: Id, span: Span},
+    /// projection of a field out of the module named by `prefix`; `field` is resolved
+    /// against that module's signature rather than lexical scope, so it is never stamped
+    Select{prefix: Box<Path<Id>>, field: String, span: Span}
+}
+
+impl Path<Ident> {
+    /// Resolves the module identifier at the root of `path` against the in-scope
+    /// identifiers in `ctxt`, returning the offending name and span if it is unbound
+    pub fn stamp_ids(path: &Path<String>, ctxt: &ImHashMap<String, Ident>) -> Result<Path<Ident>, (String, Span)> {
+        match path {
+            Path::RootId { id, span } => {
+                let ident = ctxt.get(id)
+                    .ok_or_else(|| (format!("unbound module identifier: {}", id), span.clone()))?;
+                Ok(Path::RootId {
+                    id: ident.clone(),
+                    span: span.clone(),
+                })
+            },
+            Path::Select { prefix, field, span } => Ok(Path::Select {
+                prefix: Box::new(Path::stamp_ids(prefix, ctxt)?),
+                field: field.clone(),
+                span: span.clone(),
+            }),
+        }
+    }
+
+
+}
+
+impl<Id> Path<Id> {
+    pub fn span(&self) -> &Span {
+        match self {
+            Path::RootId { span, .. } | Path::Select { span, .. } => span,
+        }
+    }
+}
+
+impl<Id: Eq> Path<Id> {
+
+    /// Path equality that ignores spans
+    pub fn is_equal(&self, other: &Path<Id>) -> bool {
+        match (self, other) {
+            (Path::RootId { id: id_a, .. }, Path::RootId { id: id_b, .. }) => {
+                id_a == id_b
+            }
+            (Path::Select { prefix: prefix_a, field: field_a, .. },
+             Path::Select { prefix: prefix_b, field: field_b, .. }) => {
+                field_a == field_b && prefix_a.is_equal(prefix_b)
+            }
+            _ => false,
+        }
+    }
+}
+
+impl<Id: Display> fmt::Display for Path<Id> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Path::RootId { id, .. } => write!(f, "{}", id),
+            Path::Select { prefix, field, .. } => write!(f, "{}.{}", prefix, field),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Variant<Id> {
     pub constructor_name: String,
     pub fields: Vec<(String, Ty<Id>, Span)>
@@ -37,7 +104,7 @@ pub enum Ty<Id> {
         range: Span
     },
     /// a type identifier that refers to a type defined in a module
-    IdTy { name: Id, span: Span },
+    IdTy { path: Path<Id>, span: Span },
     /// a parameter to a type function, e.g. 'a
     VarTy { name: Id, span: Span },
     TyFunTy { dom: Vec<Id>, cod:Box<Ty<Id>>, span: Span },
@@ -76,11 +143,9 @@ impl Ty<Ident> {
                     range: range.clone(),
                 })
             },
-            Ty::IdTy { name, span } => {
-                let ident = ctxt.get(name)
-                    .ok_or_else(|| (format!("unbound type identifier: {}", name), span.clone()))?;
+            Ty::IdTy { path, span } => {
                 Ok(Ty::IdTy {
-                    name: ident.clone(),
+                    path: Path::stamp_ids(path, ctxt)?,
                     span: span.clone(),
                 })
             },
@@ -112,6 +177,61 @@ impl Ty<Ident> {
                 ty_fn: Box::new(Ty::stamp_ids(ty_fn, ctxt)?),
                 span: span.clone(),
             }),
+        }
+    }
+}
+
+/// Classifies types. A type component of a module signature is abstract when its
+/// kind is `Star` and transparent when its kind is a `Singleton`; sealing a module
+/// weakens `Singleton` to `Star`, which is the only way abstraction is introduced.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Kind<Id> {
+    /// the kind of proper types whose definition is not known here
+    Star { span: Span },
+    /// S(ty), the kind inhabited only by types equivalent to `ty`; a transparent
+    /// type definition is recorded with this kind
+    Singleton { ty: Box<Ty<Id>>, span: Span },
+    /// the kind of a type function. There is no singleton at arrow kind, so a type
+    /// function's definition is inlined at application sites rather than tracked here
+    Arrow { dom: Vec<Kind<Id>>, cod: Box<Kind<Id>>, span: Span },
+}
+
+impl<Id> Kind<Id> {
+    pub fn span(&self) -> &Span {
+        match self {
+            Kind::Star { span } | Kind::Singleton { span, .. } | Kind::Arrow { span, .. } => span,
+        }
+    }
+}
+
+impl Kind<Ident> {
+    pub fn stamp_ids(kind: &Kind<String>, ctxt: &ImHashMap<String, Ident>) -> Result<Kind<Ident>, (String, Span)> {
+        match kind {
+            Kind::Star { span } => Ok(Kind::Star { span: span.clone() }),
+            Kind::Singleton { ty, span } => Ok(Kind::Singleton {
+                ty: Box::new(Ty::stamp_ids(ty, ctxt)?),
+                span: span.clone(),
+            }),
+            Kind::Arrow { dom, cod, span } => Ok(Kind::Arrow {
+                dom: dom.iter()
+                    .map(|k| Kind::stamp_ids(k, ctxt))
+                    .collect::<Result<Vec<_>, (String, Span)>>()?,
+                cod: Box::new(Kind::stamp_ids(cod, ctxt)?),
+                span: span.clone(),
+            }),
+        }
+    }
+}
+
+impl<Id: Display> fmt::Display for Kind<Id> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Kind::Star { .. } => write!(f, "*"),
+            Kind::Singleton { ty, .. } => write!(f, "S({})", ty),
+            Kind::Arrow { dom, cod, .. } => {
+                let dom_strs: Vec<String> = dom.iter().map(|k| k.to_string()).collect();
+                write!(f, "({}) -> {}", dom_strs.join(", "), cod)
+            }
         }
     }
 }
@@ -148,10 +268,10 @@ impl<Id: Eq + Hash + Clone> Ty<Id> {
                     })
                 })
             }
-            (Ty::IdTy { name:name_a, ..}, Ty::IdTy { name:name_b, ..}) => {
-                name_a == name_b
+            (Ty::IdTy { path:path_a, ..}, Ty::IdTy { path:path_b, ..}) => {
+                path_a.is_equal(path_b)
             }
-            (Ty::VarTy { name: name_a, .. }, Ty::IdTy { name: name_b, .. }) => {
+            (Ty::VarTy { name: name_a, .. }, Ty::VarTy { name: name_b, .. }) => {
                 match renaming.get(&name_a) {
                     Some(&renamed) => *renamed == *name_b,
                     None => *name_a == *name_b,
@@ -208,7 +328,7 @@ impl<Id: Display> fmt::Display for Ty<Id> {
             }
             Ty::RefTy { contained_ty, .. } => write!(f, "Ref {}", contained_ty),
             Ty::SumTy { .. } => write!(f, "sumTy"),
-            Ty::IdTy { name, .. } => write!(f, "{}", name),
+            Ty::IdTy { path, .. } => write!(f, "{}", path),
             Ty::VarTy { name, .. } => write!(f, "{}", name),
             Ty::TyFunTy { dom, cod, .. } => {
                 let formal_names : Vec<String> = dom.iter().map(|d| d.to_string()).collect();
@@ -223,14 +343,14 @@ impl<Id: Display> fmt::Display for Ty<Id> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Typedef<Id> {
+pub struct SumTypeDef<Id> {
     pub typename: Id,
     pub variants: Vec<Variant<Id>>,
     pub span: Span,
 }
 
-impl Typedef<Ident> {
-    pub fn stamp_ids(def: &Typedef<String>, ctxt: &ImHashMap<String, Ident>) -> Result<Typedef<Ident>, (String, Span)> {
+impl SumTypeDef<Ident> {
+    pub fn stamp_ids(def: &SumTypeDef<String>, ctxt: &ImHashMap<String, Ident>) -> Result<SumTypeDef<Ident>, (String, Span)> {
         let ident = ctxt.get(&def.typename)
             .ok_or_else(|| (format!("unbound type name: {}", def.typename), def.span.clone()))?;
         let new_variants = def.variants.iter().map(|v| {
@@ -242,7 +362,7 @@ impl Typedef<Ident> {
                 fields: new_fields,
             })
         }).collect::<Result<Vec<_>, (String, Span)>>()?;
-        Ok(Typedef {
+        Ok(SumTypeDef {
             typename: ident.clone(),
             variants: new_variants,
             span: def.span.clone(),
@@ -372,6 +492,9 @@ pub enum Expr<Id> {
         span: Span,
     },
     Var(Id, Span),
+    /// projection of a value component out of a module, e.g. `M.x`; the path's final
+    /// `Select` names the value component and its prefix names the module
+    ValPath { path: Path<Id>, span: Span },
     Let {
         bound_pat: Box<Pattern<Id>>,
         bind_to: Box<Expr<Id>>,
@@ -447,6 +570,10 @@ impl Expr<Ident> {
                     .ok_or_else(|| (format!("unbound variable: {}", name), span.clone()))?;
                 Ok(Expr::Var(ident.clone(), span.clone()))
             }
+            Expr::ValPath { path, span } => Ok(Expr::ValPath {
+                path: Path::stamp_ids(path, ctxt)?,
+                span: span.clone(),
+            }),
             Expr::Int(n, span) => Ok(Expr::Int(*n, span.clone())),
             Expr::Tuple(exprs, span) => {
                 let new_exprs = exprs.iter().map(|e| conv(e)).collect::<Result<Vec<_>, _>>()?;
@@ -572,7 +699,8 @@ impl<Id: Clone + Hash + Eq> Expr<Id> {
             | Expr::Eq(_, _, span) | Expr::Leq(_, _, span) | Expr::Geq(_, _, span)
             | Expr::Lt(_, _, span) | Expr::Gt(_, _, span) | Expr::Var(_, span)
             | Expr::Int(_, span) | Expr::Tuple(_, span) => span,
-            Expr::FunAbstraction { span, .. } | Expr::Let { span, .. }
+            Expr::ValPath { span, .. }
+            | Expr::FunAbstraction { span, .. } | Expr::Let { span, .. }
             | Expr::LetRec { span, .. } | Expr::Application { span, .. }
             | Expr::ConstructorApplication { span, .. } | Expr::Match { span, .. }
             | Expr::IfThenElse { span, .. }
@@ -587,7 +715,8 @@ impl<Id: Clone + Hash + Eq> Expr<Id> {
             | Expr::Eq(_, _, span) | Expr::Leq(_, _, span) | Expr::Geq(_, _, span)
             | Expr::Lt(_, _, span) | Expr::Gt(_, _, span) | Expr::Var(_, span)
             | Expr::Int(_, span) | Expr::Tuple(_, span) => *span = new_span,
-            Expr::FunAbstraction { span, .. } | Expr::Let { span, .. }
+            Expr::ValPath { span, .. }
+            | Expr::FunAbstraction { span, .. } | Expr::Let { span, .. }
             | Expr::LetRec { span, .. } | Expr::Application { span, .. }
             | Expr::ConstructorApplication { span, .. } | Expr::Match { span, .. }
             | Expr::IfThenElse { span, .. }
@@ -617,6 +746,10 @@ impl<Id: Clone + Hash + Eq> Expr<Id> {
                 set.insert(name.clone());
                 set
             }
+
+            // a path's root is a module identifier resolved through the module table,
+            // not the variable environment, so a projection captures nothing
+            Expr::ValPath { .. } => HashSet::new(),
 
             Expr::Let { bound_pat, bind_to, body, .. } => {
                 let body_free = body.free_vars()
@@ -697,26 +830,126 @@ impl<Id: Clone + Hash + Eq> Expr<Id> {
     }
 }
 
+/// A whole program: the components of a module, written without the enclosing `mod` and
+/// `end`, which must include a value component named `run` of type `() -> int`
 #[derive(Debug, Clone, PartialEq)]
 pub struct Prog<Id> {
-    pub typedefs: Vec<Typedef<Id>>,
-    pub expr: Expr<Id>,
+    pub fields: Vec<FieldDef<Id>>,
+    pub span: Span,
+}
+
+/// A single component of a structure. Components are positionally scoped: each one may
+/// refer to those preceding it, and to nothing that follows. Type and value components
+/// are interleaved in one list rather than stratified, because a type component's kind
+/// can mention any preceding component via a singleton
+#[derive(Debug, Clone, PartialEq)]
+pub enum FieldDef<Id> {
+    /// a value definition, e.g. `val x = 3`
+    ValDef{id: Id, expr: Expr<Id>, span: Span},
+    /// a transparent type definition, e.g. `type t = int`
+    TyDef{id: Id, ty: Ty<Id>, span: Span},
+    /// a discriminated union definition, which also brings its constructors into scope
+    SumTypeDef{def: SumTypeDef<Id>},
+    /// a submodule definition, e.g. `module M = struct ... end`
+    ModDef{id: Id, module: ModuleTerm<Id>, span: Span}
+}
+
+impl<Id> FieldDef<Id> {
+    pub fn span(&self) -> &Span {
+        match self {
+            FieldDef::ValDef { span, .. } | FieldDef::TyDef { span, .. }
+            | FieldDef::ModDef { span, .. } => span,
+            FieldDef::SumTypeDef { def } => &def.span,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ModuleTerm<Id> {
+    /// a literal module, written `mod ... end`, whose components are scoped positionally
+    Mod{fields: Vec<FieldDef<Id>>, span: Span},
+    /// a reference to a module already in scope, possibly projected from another module
+    ModulePath{path: Path<Id>, span: Span}
+}
+
+impl<Id> ModuleTerm<Id> {
+    pub fn span(&self) -> &Span {
+        match self {
+            ModuleTerm::Mod { span, .. } | ModuleTerm::ModulePath { span, .. } => span,
+        }
+    }
+}
+
+impl ModuleTerm<Ident> {
+    /// Stamps a structure's components in order, threading the context forward so that
+    /// each component is stamped under the bindings introduced by its predecessors
+    pub fn stamp_ids(module: &ModuleTerm<String>, ctxt: &ImHashMap<String, Ident>)
+        -> Result<ModuleTerm<Ident>, (String, Span)>
+    {
+        match module {
+            ModuleTerm::ModulePath { path, span } => Ok(ModuleTerm::ModulePath {
+                path: Path::stamp_ids(path, ctxt)?,
+                span: span.clone(),
+            }),
+            ModuleTerm::Mod { fields, span } => {
+                let mut inner_ctxt = ctxt.clone();
+                let mut new_fields = Vec::new();
+                for field in fields {
+                    new_fields.push(FieldDef::stamp_ids(field, &mut inner_ctxt)?);
+                }
+                Ok(ModuleTerm::Mod {
+                    fields: new_fields,
+                    span: span.clone(),
+                })
+            }
+        }
+    }
+}
+
+impl FieldDef<Ident> {
+    /// Stamps one component, extending `ctxt` with the identifier it binds so that
+    /// subsequent components in the same structure can refer to it
+    pub fn stamp_ids(field: &FieldDef<String>, ctxt: &mut ImHashMap<String, Ident>)
+        -> Result<FieldDef<Ident>, (String, Span)>
+    {
+        match field {
+            FieldDef::ValDef { id, expr, span } => {
+                let new_expr = Expr::stamp_ids(expr, ctxt)?;
+                let ident = Ident::new(id.clone());
+                ctxt.insert(id.clone(), ident.clone());
+                Ok(FieldDef::ValDef { id: ident, expr: new_expr, span: span.clone() })
+            },
+            FieldDef::TyDef { id, ty, span } => {
+                let new_ty = Ty::stamp_ids(ty, ctxt)?;
+                let ident = Ident::new(id.clone());
+                ctxt.insert(id.clone(), ident.clone());
+                Ok(FieldDef::TyDef { id: ident, ty: new_ty, span: span.clone() })
+            },
+            FieldDef::SumTypeDef { def } => {
+                let ident = Ident::new(def.typename.clone());
+                ctxt.insert(def.typename.clone(), ident);
+                Ok(FieldDef::SumTypeDef { def: SumTypeDef::stamp_ids(def, ctxt)? })
+            },
+            FieldDef::ModDef { id, module, span } => {
+                let new_module = ModuleTerm::stamp_ids(module, ctxt)?;
+                let ident = Ident::new(id.clone());
+                ctxt.insert(id.clone(), ident.clone());
+                Ok(FieldDef::ModDef { id: ident, module: new_module, span: span.clone() })
+            }
+        }
+    }
 }
 
 impl Prog<Ident> {
     pub fn stamp_ids(p: &Prog<String>) -> Result<Prog<Ident>, (String, Span)> {
         let mut ctxt = ImHashMap::new();
-        let mut new_typedefs = Vec::new();
-        for td in &p.typedefs {
-            let ident = Ident::new(td.typename.clone());
-            ctxt.insert(td.typename.clone(), ident);
-            let new_td = Typedef::stamp_ids(td, &ctxt)?;
-            new_typedefs.push(new_td);
+        let mut new_fields = Vec::new();
+        for field in &p.fields {
+            new_fields.push(FieldDef::stamp_ids(field, &mut ctxt)?);
         }
-        let expr = Expr::stamp_ids(&p.expr, &ctxt)?;
         Ok(Prog {
-            typedefs: new_typedefs,
-            expr,
+            fields: new_fields,
+            span: p.span.clone(),
         })
     }
 }

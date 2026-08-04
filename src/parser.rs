@@ -47,8 +47,14 @@ pub enum Token {
     Ref,
     Typedef,
     To,
+    Mod,
+    End,
+    Val,
+    Type,
+    Module,
 
     // Punctuation
+    Period,
     Semicolon,
     Comma,
     Colon,
@@ -74,6 +80,11 @@ pub fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>> {
             "and" => Token::And,
             "ref" => Token::Ref,
             "typedef" => Token::Typedef,
+            "mod" => Token::Mod,
+            "end" => Token::End,
+            "val" => Token::Val,
+            "type" => Token::Type,
+            "module" => Token::Module,
             "to" => Token::To,
             "int" => Token::TypeInt,
             _ => {
@@ -109,6 +120,7 @@ pub fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>> {
         just(";").to(Token::Semicolon),
         just(",").to(Token::Comma),
         just(":").to(Token::Colon),
+        just(".").to(Token::Period),
     ));
 
     let comment = just("//").then(take_until(text::newline())).ignored();
@@ -286,6 +298,33 @@ pub fn expr_parser() -> impl Parser<Token, Expr<String>, Error = Simple<Token>> 
             .separated_by(just(Token::Comma))
             .delimited_by(just(Token::LBrack), just(Token::RBrack));
 
+        // Value projection from a module: M.x or A.B.x
+        let val_path = select! { Token::Constructor(name) => name }
+            .map_with_span(|name, span: Span| (name, span))
+            .then(
+                just(Token::Period)
+                    .ignore_then(
+                        select! { Token::Constructor(name) => name }
+                            .map_with_span(|name, span: Span| (name, span))
+                    )
+                    .repeated()
+            )
+            .then_ignore(just(Token::Period))
+            .then(
+                select! { Token::Id(name) => name }
+                    .map_with_span(|name, span: Span| (name, span))
+            )
+            .map(|(((root, root_span), submods), (field, field_span))| {
+                let mut path = Path::RootId { id: root, span: root_span };
+                for (name, name_span) in submods {
+                    let sel_span = merge_spans(path.span(), &name_span);
+                    path = Path::Select { prefix: Box::new(path), field: name, span: sel_span };
+                }
+                let span = merge_spans(path.span(), &field_span);
+                let path = Path::Select { prefix: Box::new(path), field, span: span.clone() };
+                Expr::ValPath { path, span }
+            });
+
         // Constructor application: (Constructor {f1 : e1, f2 : e2})
         let constructor_app = select! { Token::Constructor(name) => name }
             .then(fields)
@@ -316,6 +355,7 @@ pub fn expr_parser() -> impl Parser<Token, Expr<String>, Error = Simple<Token>> 
             if_then_else,
             match_expr,
             ref_constructor,
+            val_path,
             constructor_app,
             paren_expr,
         ));
@@ -428,12 +468,32 @@ pub fn expr_parser() -> impl Parser<Token, Expr<String>, Error = Simple<Token>> 
     })
 }
 
+pub fn path_parser() -> impl Parser<Token, Path<String>, Error = Simple<Token>> + Clone {
+    let ident = select! { Token::Id(name) => name, Token::Constructor(name) => name }
+        .map_with_span(|name, span: Span| (name, span));
+
+    ident.clone()
+        .then(just(Token::Period).ignore_then(ident).repeated())
+        .map(|((root, root_span), fields)| {
+            let mut path = Path::RootId { id: root, span: root_span };
+            for (field, field_span) in fields {
+                let span = merge_spans(path.span(), &field_span);
+                path = Path::Select {
+                    prefix: Box::new(path),
+                    field,
+                    span,
+                };
+            }
+            path
+        })
+}
+
 pub fn type_parser() -> impl Parser<Token, Ty<String>, Error = Simple<Token>> + Clone {
     recursive(|ty| {
         let int_ty = just(Token::TypeInt).map_with_span(|_, span| Ty::IntTy(span));
 
-        let id_ty = select! { Token::Id(name) => name }
-            .map_with_span(|name, span| Ty::IdTy { name, span });
+        let id_ty = path_parser()
+            .map_with_span(|path, span| Ty::IdTy { path, span });
 
         // Reference type: Ref type
         let ref_ty = just(Token::Ref)
@@ -476,7 +536,7 @@ pub fn type_parser() -> impl Parser<Token, Ty<String>, Error = Simple<Token>> + 
     })
 }
 
-pub fn typedef_parser() -> impl Parser<Token, Typedef<String>, Error = Simple<Token>> {
+pub fn typedef_parser() -> impl Parser<Token, SumTypeDef<String>, Error = Simple<Token>> {
     let fields = select! { Token::Id(id) => id }
         .then_ignore(just(Token::Colon))
         .then(type_parser())
@@ -493,18 +553,54 @@ pub fn typedef_parser() -> impl Parser<Token, Typedef<String>, Error = Simple<To
         .ignore_then(select! { Token::Constructor(typename) => typename })
         .then_ignore(just(Token::Bind))
         .then(variant.repeated().at_least(1))
-        .map_with_span(|(typename, variants), span| Typedef {
+        .map_with_span(|(typename, variants), span| SumTypeDef {
             typename,
             variants,
             span,
         })
 }
 
+/// Parses the components of a module: `val x = e`, `type t = ty`, a `typedef`, or a
+/// nested `module M = mod ... end`
+pub fn field_def_parser() -> impl Parser<Token, FieldDef<String>, Error = Simple<Token>> + Clone {
+    recursive(|field_def| {
+        let module_term = just(Token::Mod)
+            .ignore_then(field_def.repeated())
+            .then_ignore(just(Token::End))
+            .map_with_span(|fields, span| ModuleTerm::Mod { fields, span })
+            .or(path_parser().map_with_span(|path, span| ModuleTerm::ModulePath { path, span }));
+
+        let val_def = just(Token::Val)
+            .ignore_then(select! { Token::Id(id) => id })
+            .then_ignore(just(Token::Bind))
+            .then(expr_parser())
+            .map_with_span(|(id, expr), span| FieldDef::ValDef { id, expr, span });
+
+        let ty_def = just(Token::Type)
+            .ignore_then(select! { Token::Id(id) => id })
+            .then_ignore(just(Token::Bind))
+            .then(type_parser())
+            .map_with_span(|(id, ty), span| FieldDef::TyDef { id, ty, span });
+
+        let mod_def = just(Token::Module)
+            .ignore_then(select! { Token::Constructor(id) => id })
+            .then_ignore(just(Token::Bind))
+            .then(module_term)
+            .map_with_span(|(id, module), span| FieldDef::ModDef { id, module, span });
+
+        choice((
+            val_def,
+            ty_def,
+            mod_def,
+            typedef_parser().map(|def| FieldDef::SumTypeDef { def }),
+        ))
+    })
+}
+
 pub fn prog_parser() -> impl Parser<Token, Prog<String>, Error = Simple<Token>> {
-    typedef_parser()
+    field_def_parser()
         .repeated()
-        .then(expr_parser())
-        .map(|(typedefs, expr)| Prog { typedefs, expr })
+        .map_with_span(|fields, span| Prog { fields, span })
         .then_ignore(end())
 }
 
@@ -794,14 +890,14 @@ mod tests {
 
     #[test]
     fn test_parse_typedef() {
-        let input = "typedef Option = | Some {val : int} | None {}";
+        let input = "typedef Option = | Some {contents : int} | None {}";
         let tokens = lexer().parse(input).unwrap();
         let len = input.len();
         let stream = Stream::from_iter(len..len + 1, tokens.into_iter());
         let result = typedef_parser().parse(stream);
         assert!(result.is_ok());
         match result.unwrap() {
-            Typedef { typename, variants, .. } => {
+            SumTypeDef { typename, variants, .. } => {
                 assert_eq!(typename, "Option");
                 assert_eq!(variants.len(), 2);
                 assert_eq!(variants[0].fields.len(), 1);
@@ -812,17 +908,18 @@ mod tests {
 
     #[test]
     fn test_parse_prog_with_typedef() {
-        let input = "typedef Bool = | True {val : int} | False {val : int}\n42";
+        let input = "typedef Bool = | True {b : int} | False {b : int}\nval run = fun () -> 42";
         let result = parse_prog(input);
         assert!(result.is_ok());
-        match result.unwrap() {
-            Prog { typedefs, expr } => {
-                assert_eq!(typedefs.len(), 1);
-                match expr {
-                    Expr::Int(n, _) => assert_eq!(n, 42),
-                    _ => panic!("Expected Int expression"),
-                }
-            }
+        let prog = result.unwrap();
+        assert_eq!(prog.fields.len(), 2);
+        match &prog.fields[0] {
+            FieldDef::SumTypeDef { def } => assert_eq!(def.variants.len(), 2),
+            _ => panic!("Expected a typedef"),
+        }
+        match &prog.fields[1] {
+            FieldDef::ValDef { id, .. } => assert_eq!(id, "run"),
+            _ => panic!("Expected a val definition"),
         }
     }
 
@@ -980,7 +1077,7 @@ mod tests {
 
     #[test]
     fn test_parse_constructor_pattern_one_field() {
-        let result = parse_expr("let Some {val : x} = e in x");
+        let result = parse_expr("let Some {contents : x} = e in x");
         assert!(result.is_ok());
         match result.unwrap() {
             Expr::Let { bound_pat, .. } => {
@@ -988,8 +1085,8 @@ mod tests {
                     Pattern::ConstructorApplication { name, fields, .. } => {
                         assert_eq!(name, "Some");
                         assert_eq!(fields.len(), 1);
-                        assert!(fields.contains_key("val"));
-                        match &*fields["val"].0 {
+                        assert!(fields.contains_key("contents"));
+                        match &*fields["contents"].0 {
                             Pattern::Var(v, _) => assert_eq!(v, "x"),
                             _ => panic!("Expected Var sub-pattern"),
                         }
@@ -1023,7 +1120,7 @@ mod tests {
 
     #[test]
     fn test_parse_constructor_pattern_nested() {
-        let result = parse_expr("let Some {val : (a, b)} = e in a + b");
+        let result = parse_expr("let Some {contents : (a, b)} = e in a + b");
         assert!(result.is_ok());
         match result.unwrap() {
             Expr::Let { bound_pat, .. } => {
@@ -1031,7 +1128,7 @@ mod tests {
                     Pattern::ConstructorApplication { name, fields, .. } => {
                         assert_eq!(name, "Some");
                         assert_eq!(fields.len(), 1);
-                        match &*fields["val"].0 {
+                        match &*fields["contents"].0 {
                             Pattern::Tuple(pats, _) => assert_eq!(pats.len(), 2),
                             _ => panic!("Expected Tuple sub-pattern"),
                         }

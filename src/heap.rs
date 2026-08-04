@@ -247,6 +247,22 @@ impl Heap {
     (code_addr, args_addr, globals_addr)
   }
 
+  /// Overwrites element `i` of the vector at `addr`.
+  pub fn set_vector_elem(&mut self, addr: HeapAddr, i: usize, elem: HeapAddr) {
+    let addr = usize::try_from(addr).unwrap();
+    assert!(self.data[addr] == TAG_VECTOR);
+    let len: usize = u32::from_le_bytes([self.data[addr + 1], self.data[addr + 2], self.data[addr + 3], self.data[addr + 4]])
+      .try_into()
+      .unwrap();
+    assert!(i < len);
+    let elem_addr = addr + 5 + i * 4;
+    let bytes = u32::try_from(elem).unwrap().to_le_bytes();
+    self.data[elem_addr + 0] = bytes[0];
+    self.data[elem_addr + 1] = bytes[1];
+    self.data[elem_addr + 2] = bytes[2];
+    self.data[elem_addr + 3] = bytes[3];
+  }
+
   pub fn expect_vector(&self, addr: HeapAddr) -> Vec<HeapAddr> {
     let addr = usize::try_from(addr).unwrap();
     assert!(self.data[addr] == TAG_VECTOR);

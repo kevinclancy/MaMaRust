@@ -28,8 +28,53 @@ use mama_rust::{address_resolution, code_builder};
 //     assert_eq!(result, expected_result);
 // }
 
-fn run_test_prog(prog_str: &str, expected_result: i32) {
+/// Wraps a test program's trailing expression in the `run` component that a program must
+/// define, leaving any leading `typedef` declarations as sibling components. The split
+/// point is found by trying every position at which the remainder parses as an expression
+fn as_module_prog(prog_str: &str) -> String {
+    for split in prog_str.char_indices().map(|(i, _)| i).chain([prog_str.len()]) {
+        let (typedefs, body) = prog_str.split_at(split);
+        if body.trim().is_empty() {
+            continue;
+        }
+        let candidate = format!("{} val run = fun () -> ({})", typedefs, body);
+        if parse_prog(&candidate).is_ok() {
+            return candidate;
+        }
+    }
+    panic!("could not find a split point that parses: {}", prog_str)
+}
+
+/// Parses and runs a program already in module form (its own `val run = ...`)
+fn run_module_prog(prog_str: &str, expected_result: i32) {
     let prog = parse_prog(prog_str).unwrap();
+    let prog2 = Prog::stamp_ids(&prog).unwrap();
+    let (_ty, code) = gen_code_prog(&prog2).unwrap();
+
+    let mut code_vec : Vec<i32> = code.into_iter().collect();
+    code_vec.push(code_builder::halt());
+
+    let resolved_code_vec = address_resolution::resolve(&code_vec);
+
+    let mut vm = from_instructions(resolved_code_vec);
+    let result = execute(&mut vm);
+
+    assert_eq!(result, expected_result);
+}
+
+/// Asserts that a program in module form fails code generation with a message containing
+/// `expected_msg`
+fn assert_prog_type_error(prog_str: &str, expected_msg: &str) {
+    let prog = parse_prog(prog_str).unwrap();
+    let prog2 = Prog::stamp_ids(&prog).unwrap();
+    match gen_code_prog(&prog2) {
+        Ok(_) => panic!("expected a type error, but the program compiled"),
+        Err((msg, _)) => assert!(msg.contains(expected_msg)),
+    }
+}
+
+fn run_test_prog(prog_str: &str, expected_result: i32) {
+    let prog = parse_prog(&as_module_prog(prog_str)).unwrap();
     let prog2 = Prog::stamp_ids(&prog).unwrap();
     let (ty, code) = gen_code_prog(&prog2).unwrap();
 
@@ -153,8 +198,8 @@ fn test_assign() {
 #[test]
 fn test_match() {
     run_test_prog(
-        "typedef Option = | Some {val : int} | None {} \
-         match Some {val : 5} with | Some {val : x} -> x | None {} -> 0",
+        "typedef Option = | Some {contents : int} | None {} \
+         match Some {contents : 5} with | Some {contents : x} -> x | None {} -> 0",
         5
     );
 }
@@ -182,8 +227,8 @@ fn test_assign_add() {
 #[test]
 fn test_match2() {
     run_test_prog(
-        "typedef Option = | Some {val : int} | None {} \
-         match Some {val : 42} with | Some {val : x} -> x | None {} -> 0",
+        "typedef Option = | Some {contents : int} | None {} \
+         match Some {contents : 42} with | Some {contents : x} -> x | None {} -> 0",
         42
     );
 }
@@ -216,8 +261,8 @@ fn test_match_catch_all_guard() {
 #[test]
 fn test_let_constructor_pattern() {
     run_test_prog(
-        "typedef Option = | Some {val : int} | None {} \
-         let Some {val : x} = Some {val : 42} in x",
+        "typedef Option = | Some {contents : int} | None {} \
+         let Some {contents : x} = Some {contents : 42} in x",
         42
     );
 }
@@ -243,8 +288,8 @@ fn test_let_constructor_pattern_tuple_fields() {
 #[test]
 fn test_let_constructor_nested_tuple() {
     run_test_prog(
-        "typedef Wrapper = | Wrap {val : (int, int)} \
-         let Wrap {val : (x, y)} = Wrap {val : (10, 20)} in x + y",
+        "typedef Wrapper = | Wrap {contents : (int, int)} \
+         let Wrap {contents : (x, y)} = Wrap {contents : (10, 20)} in x + y",
         30
     );
 }
@@ -257,8 +302,8 @@ fn cbv_application() {
 #[test]
 fn cbv_constructor() {
     run_test_prog(
-        "typedef Option = | Some {val : int} | None {} \
-         let z = ref 0 in z := !z + 1; let q = (Some { val : !z }) in 1",
+        "typedef Option = | Some {contents : int} | None {} \
+         let z = ref 0 in z := !z + 1; let q = (Some { contents : !z }) in 1",
     1);
 }
 
@@ -304,5 +349,198 @@ fn test_dont_collect_gp2() {
             in foo \
          in (mkFoo ()) 0",
         1
+    );
+}
+#[test]
+fn module_val_projection() {
+    run_module_prog(
+        "module M = mod val x = 42 end \
+         val run = fun () -> M.x",
+        42
+    );
+}
+
+#[test]
+fn module_fun_projection() {
+    run_module_prog(
+        "module M = mod val double = fun (a : int) -> a * 2 end \
+         val run = fun () -> M.double 21",
+        42
+    );
+}
+
+#[test]
+fn module_telescoping_fields() {
+    run_module_prog(
+        "module M = mod val x = 10 val y = x + 5 end \
+         val run = fun () -> M.y",
+        15
+    );
+}
+
+#[test]
+fn module_backward_reference() {
+    run_module_prog(
+        "module M = mod val x = 5 end \
+         module N = mod val y = M.x + 1 end \
+         val run = fun () -> N.y + M.x",
+        11
+    );
+}
+
+#[test]
+fn nested_module_projection() {
+    run_module_prog(
+        "module A = mod \
+            module B = mod val y = 7 end \
+            val x = B.y + 3 \
+         end \
+         val run = fun () -> A.B.y + A.x",
+        17
+    );
+}
+
+#[test]
+fn module_interleaved_type_fields() {
+    run_module_prog(
+        "module M = mod \
+            type t = int \
+            val a = 10 \
+            typedef Opt = | None {} \
+            val b = 20 \
+         end \
+         val run = fun () -> M.a + M.b",
+        30
+    );
+}
+
+#[test]
+fn module_sum_type_values() {
+    run_module_prog(
+        "module M = mod \
+            typedef Opt = | Some {contents : int} | None {} \
+            val mk = fun (n : int) -> Some {contents : n} \
+            val get = fun (o : Opt) -> match o with | Some {contents : x} -> x | None {} -> 0 \
+         end \
+         val run = fun () -> M.get (M.mk 5)",
+        5
+    );
+}
+
+#[test]
+fn nested_module_sum_type() {
+    run_module_prog(
+        "module A = mod \
+            module B = mod \
+                typedef Opt = | Some {contents : int} | None {} \
+                val mk = fun (n : int) -> Some {contents : n} \
+                val get = fun (o : Opt) -> match o with | Some {contents : x} -> x | None {} -> 0 \
+            end \
+            val y = B.get (B.mk 7) \
+         end \
+         val run = fun () -> A.y",
+        7
+    );
+}
+
+// Two modules each define a type named `T`. Stamping gives the two `T`s distinct
+// identifiers, so values of one never satisfy a function expecting the other.
+const TWO_MODULES_NAMED_T: &str =
+    "module M = mod \
+        typedef T = | A {v : int} \
+        val mk = fun (n : int) -> A {v : n} \
+        val get = fun (t : T) -> match t with | A {v : x} -> x \
+     end \
+     module N = mod \
+        typedef T = | B {v : int} \
+        val mk = fun (n : int) -> B {v : n} \
+        val get = fun (t : T) -> match t with | B {v : x} -> x \
+     end ";
+
+#[test]
+fn stamping_keeps_same_named_types_usable() {
+    run_module_prog(
+        &format!("{} val run = fun () -> M.get (M.mk 1) + N.get (N.mk 2)", TWO_MODULES_NAMED_T),
+        3
+    );
+}
+
+#[test]
+fn stamping_rejects_crossed_same_named_types() {
+    assert_prog_type_error(
+        &format!("{} val run = fun () -> M.get (N.mk 2)", TWO_MODULES_NAMED_T),
+        "argument type mismatch"
+    );
+}
+
+#[test]
+fn stamping_keeps_shadowed_type_live() {
+    run_module_prog(
+        "module M = mod \
+            typedef T = | A {v : int} \
+            val fromOld = fun (t : T) -> match t with | A {v : x} -> x \
+            val oldVal = fromOld (A {v : 41}) \
+            typedef T = | B {v : int} \
+            val mkNew = fun (n : int) -> B {v : n} \
+            val newVal = match mkNew 1 with | B {v : x} -> x \
+         end \
+         val run = fun () -> M.oldVal + M.newVal",
+        42
+    );
+}
+
+#[test]
+fn stamping_rejects_shadowed_type_confusion() {
+    assert_prog_type_error(
+        "module M = mod \
+            typedef T = | A {v : int} \
+            val fromOld = fun (t : T) -> match t with | A {v : x} -> x \
+            typedef T = | B {v : int} \
+            val mkNew = fun (n : int) -> B {v : n} \
+            val bad = fromOld (mkNew 1) \
+         end \
+         val run = fun () -> M.bad",
+        "argument type mismatch"
+    );
+}
+
+#[test]
+fn shadowed_val_resolves_to_last() {
+    run_module_prog(
+        "module M = mod val x = 1 val x = 2 end \
+         val run = fun () -> M.x",
+        2
+    );
+}
+
+// A reference inside the module sees the binding in scope where it appears, while a
+// projection from outside sees the last one, so both agree on which `x` they name.
+#[test]
+fn shadowed_val_agrees_inside_and_outside() {
+    run_module_prog(
+        "module M = mod \
+            val x = 1 \
+            val fromFirst = x \
+            val x = 20 \
+            val fromSecond = x \
+         end \
+         val run = fun () -> M.fromFirst + M.fromSecond + M.x",
+        41
+    );
+}
+
+// The later `T` shadows the earlier one, so a projected function annotated with `T`
+// takes values of the later type.
+#[test]
+fn shadowed_type_resolves_to_last() {
+    run_module_prog(
+        "module M = mod \
+            typedef T = | A {v : int} \
+            typedef T = | B {v : int} \
+            val mk = fun (n : int) -> B {v : n} \
+            val get = fun (t : T) -> match t with | B {v : x} -> x \
+         end \
+         val run = fun () -> M.get (M.mk 7)",
+        7
     );
 }
