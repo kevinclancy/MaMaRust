@@ -70,24 +70,19 @@ pub struct ConstructorSig {
 }
 
 /// What a single module component declares. Mirrors the `FieldDef` variants of the
-/// structure it came from
+/// module it came from
 #[derive(Debug, Clone)]
 pub enum SigComponent {
-    /// a type component, whose kind determines whether it is transparent
-    /// (a singleton) or abstract (`Star`)
+    /// a type declaration or, if the kind is a singleton, a defintion
     Ty { kind: Kind<Ident> },
-    /// a term component, its type, and its index in the module's runtime vector.
-    /// The index counts only components with runtime content, so it differs from the
-    /// component's position in `Signature::components` whenever types precede it
+    /// a term declaration, its type, and its index in the module's runtime vector
     Val { ty: Ty<Ident>, index: u16 },
-    /// a submodule, its signature, and its index in the enclosing module's vector;
-    /// a submodule occupies a single slot holding its own vector
+    /// a submodule, its signature, and its index in the enclosing module's runtime vector
     Mod { sig: Signature, index: u16 },
 }
 
 /// The components a module exports, as a telescope: each component may refer to those
-/// preceding it, so the order is semantically significant and not merely a convention
-/// for deterministic code generation
+/// preceding it
 #[derive(Debug, Clone)]
 pub struct Signature {
     /// the exported components, in declaration order
@@ -95,10 +90,7 @@ pub struct Signature {
 }
 
 impl Signature {
-    /// Looks up a component by the name it is exported under. Components are a sequence of
-    /// bindings rather than a set, so a module may export the same name more than once; the
-    /// last such component shadows the earlier ones, matching how a reference inside the
-    /// module resolves
+    /// Looks up the last component whose name matches `field`
     pub fn lookup(&self, field: &str) -> Option<&SigComponent> {
         self.components.iter()
             .rev()
@@ -106,9 +98,7 @@ impl Signature {
             .map(|(_, component)| component)
     }
 
-    /// The type and runtime slot index of a term component. Code generation reaches the
-    /// runtime layout only through this and `lookup_mod_layout`, so that separating a
-    /// signature into its static and dynamic parts later need not touch every call site
+    /// Get the type and runtime slot index of a term component
     pub fn lookup_val_layout(&self, field: &str) -> Option<(&Ty<Ident>, u16)> {
         match self.lookup(field)? {
             SigComponent::Val { ty, index } => Some((ty, *index)),
@@ -116,7 +106,7 @@ impl Signature {
         }
     }
 
-    /// The signature and runtime slot index of a submodule component
+    /// Get the signature and runtime slot index of a submodule component
     pub fn lookup_mod_layout(&self, field: &str) -> Option<(&Signature, u16)> {
         match self.lookup(field)? {
             SigComponent::Mod { sig, index } => Some((sig, *index)),
@@ -125,18 +115,16 @@ impl Signature {
     }
 }
 
-/// Where a module's runtime vector lives. Only static addresses exist for now; functor
-/// parameters and modules bound inside a function body will need a stack-local case
+/// The physical location of a module vector
 #[derive(Debug, Clone)]
 pub enum ModAddress {
-    /// `Static(i)` is the `i`th entry of the module table, which is installed once at
-    /// program start and reachable from every call frame without closure capture
+    /// `Static(i)` is the `i`th entry of the module table
     Static(u16),
 }
 
 #[derive(Debug, Clone)]
 pub struct ModContextEntry {
-    /// What the module exports
+    /// The signature bound to the module identifier
     pub sig: Signature,
     /// The address of the module's runtime vector
     pub address: ModAddress,
@@ -148,8 +136,7 @@ pub struct ModContextEntry {
 pub struct Context {
     /// Maps each variable name in context to its address and type
     pub var_ctxt: HashMap<Ident, VarContextEntry>,
-    /// Maps each type name in context to its kind; a singleton kind carries the
-    /// definition of a transparent type, while `Star` marks an abstract one
+    /// Maps each type name in context to its kind
     pub ty_ctxt: HashMap<Ident, Kind<Ident>>,
     /// Maps each module identifier in context to its signature and address
     pub module_ctxt: HashMap<Ident, ModContextEntry>,
@@ -218,18 +205,8 @@ impl Context {
         }
     }
 
-    /// The address of the module table entry a path's root identifier denotes
-    pub fn resolve_mod_root_address(&self, id: &Ident, span: &Span)
-        -> Result<&ModAddress, (String, Span)>
-    {
-        self.module_ctxt.get(id).map(|entry| &entry.address).ok_or_else(|| {
-            (format!("unbound module identifier: {}", id), span.clone())
-        })
-    }
-
-    /// Follows a path to the sum type it transparently names. Returns None when the
-    /// path names an abstract type or a type that is not a sum, since in neither case
-    /// are the variants visible here
+    /// Resolves a dotted path to the sum type it names,
+    /// or returns `None` if the path is illegal or names something other than a sum type
     pub fn resolve_sum_ty(&self, path: &Path<Ident>) -> Result<Option<&Ty<Ident>>, (String, Span)> {
         match self.resolve_ty_path(path)? {
             Kind::Singleton { ty, .. } => Ok(match &**ty {
@@ -241,8 +218,7 @@ impl Context {
     }
 }
 
-/// Register one sum type and its constructors in the context, binding the type name at
-/// singleton kind since a typedef is always transparent where it is written
+/// Insert one sum type and its constructors into the context
 fn register_sum_typedef(ctxt: &mut Context, typedef: &SumTypeDef<Ident>) {
     let sum_variants: std::collections::HashMap<String, Vec<(String, Ty<Ident>)>> = typedef.variants.iter().map(|v| {
         let fields: Vec<(String, Ty<Ident>)> = v.fields.iter().map(|(name, ty, _)| (name.clone(), ty.clone())).collect();
@@ -278,27 +254,19 @@ pub fn process_typedefs(ctxt: &mut Context, typedefs: &[SumTypeDef<Ident>]) -> R
     Ok(())
 }
 
-/// Generate code that constructs a module's value and stores it in the module table,
-/// along with the signature describing what it exports and the table index it occupies.
-///
-/// A structure's components are telescoping: each is compiled in a context containing the
-/// bindings of its predecessors, so the components with runtime content accumulate as
-/// consecutive stack slots, exactly as a chain of nested `let`s would. Those slots are
-/// then packaged into a single vector. Type components contribute only to the compile-time
-/// context, so they occupy no slot.
+/// Generate code that pushes the module's vecotr onto the stack
+/// and computes its principal signature.
 pub fn code_module(
     ctxt: &Context,
     addr_gen: &mut AddressGenerator,
     module: &ModuleTerm<Ident>,
     stack_level: u8,
-) -> Result<(Signature, u16, Vector<i32>), (String, Span)> {
+) -> Result<(Signature, Vector<i32>), (String, Span)> {
     match module {
         ModuleTerm::ModulePath { path, .. } => {
             let sig = ctxt.resolve_module_path(path)?.clone();
-            let mod_index = addr_gen.fresh_mod_index();
-            let code = code_module_path(ctxt, path)?
-                + vector![instr::set_mod(mod_index)];
-            Ok((sig, mod_index, code))
+            let code = code_module_path(ctxt, path)?;
+            Ok((sig, code))
         },
         ModuleTerm::Mod { fields, .. } => {
             let mut inner_ctxt = ctxt.clone();
@@ -334,13 +302,14 @@ pub fn code_module(
                         components.push((def.typename.name.clone(), SigComponent::Ty { kind }));
                     },
                     FieldDef::ModDef { id, module: submodule, .. } => {
-                        let (sub_sig, sub_index, sub_code) = code_module(
+                        let (sub_sig, sub_code) = code_module(
                             &inner_ctxt,
                             addr_gen,
                             submodule,
                             stack_level + num_slots as u8
                         )?;
-                        code = code + sub_code + vector![instr::push_mod(sub_index)];
+                        let sub_index = addr_gen.fresh_mod_index();
+                        code = code + sub_code + vector![instr::push_loc(0), instr::set_mod(sub_index)];
                         inner_ctxt.module_ctxt = inner_ctxt.module_ctxt.update(id.clone(), ModContextEntry {
                             sig: sub_sig.clone(),
                             address: ModAddress::Static(sub_index),
@@ -351,10 +320,8 @@ pub fn code_module(
                 }
             }
 
-            let mod_index = addr_gen.fresh_mod_index();
             code = code + vector![mk_vec(num_slots)];
-            code = code + vector![instr::set_mod(mod_index)];
-            Ok((Signature { components }, mod_index, code))
+            Ok((Signature { components }, code))
         }
     }
 }
@@ -366,8 +333,11 @@ fn code_module_path(
 ) -> Result<Vector<i32>, (String, Span)> {
     match path {
         Path::RootId { id, span } => {
-            match ctxt.resolve_mod_root_address(id, span)? {
-                ModAddress::Static(i) => Ok(vector![instr::push_mod(*i)]),
+            let entry = ctxt.module_ctxt.get(id).ok_or_else(|| {
+                (format!("unbound module identifier: {}", id), span.clone())
+            })?;
+            match entry.address {
+                ModAddress::Static(i) => Ok(vector![instr::push_mod(i)]),
             }
         },
         Path::Select { prefix, field, span } => {
@@ -403,15 +373,6 @@ pub fn code_val_path(
     Ok((ty, prefix_code + vector![instr::get_vec_i(index), instr::eval()]))
 }
 
-/// Generate code that allocates a module table of `num_modules` null slots and installs
-/// it in the module pointer. Generates no code when `num_modules` is zero
-fn code_mod_table_setup(num_modules: u16) -> Vector<i32> {
-    if num_modules == 0 {
-        return vector![];
-    }
-    vector![instr::alloc_mod_table(num_modules)]
-}
-
 /// Generate code for a complete program: build the module its components define, then
 /// apply that module's `run` component to the unit value. Returns the type of the result,
 /// which is the return type of `run`
@@ -425,7 +386,7 @@ pub fn gen_code_prog(prog: &Prog<Ident>) -> Result<(Ty<Ident>, Vector<i32>), (St
         fields: prog.fields.clone(),
         span: prog.span.clone(),
     };
-    let (sig, mod_index, module_code) = code_module(&ctxt, &mut addr_gen, &prog_module, 0)?;
+    let (sig, module_code) = code_module(&ctxt, &mut addr_gen, &prog_module, 0)?;
 
     let Some((run_ty, run_index)) = sig.lookup_val_layout("run") else {
         return Err((
@@ -448,18 +409,20 @@ pub fn gen_code_prog(prog: &Prog<Ident>) -> Result<(Ty<Ident>, Vector<i32>), (St
     }
     let result_ty = (**cod).clone();
 
+    let top_mod_addr = addr_gen.fresh_mod_index();
     let after_addr = addr_gen.fresh_addr();
     let call_run_code = vector![
+        instr::set_mod(top_mod_addr),
         instr::mark(after_addr),
         instr::mk_vec(0),
-        instr::push_mod(mod_index),
+        instr::push_mod(top_mod_addr),
         instr::get_vec_i(run_index),
         instr::eval(),
         instr::apply(),
         instr::symbolic_addr(after_addr)
     ];
 
-    let setup_code = code_mod_table_setup(addr_gen.num_mod_indices());
+    let setup_code = vector![instr::alloc_mod_table(addr_gen.num_mod_indices())];
     Ok((result_ty, setup_code + module_code + call_run_code + fail_code))
 }
 

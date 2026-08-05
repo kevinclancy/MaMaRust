@@ -544,3 +544,15 @@ fn shadowed_type_resolves_to_last() {
         7
     );
 }
+
+#[test]
+fn nested_module_referenced_from_closure() {
+    run_module_prog(
+        "module A = mod \
+            module B = mod val y = 7 end \
+            val f = fun (n : int) -> B.y + n \
+         end \
+         val run = fun () -> A.f 3",
+        10
+    );
+}

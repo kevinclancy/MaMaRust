@@ -105,7 +105,7 @@ pub fn mk_vec(n: u16) -> i32 {
 }
 
 /// Replaces the vector on top of the stack with its element at index `i`, unlike
-/// `get_vec`, which explodes every element of the vector onto the stack
+/// `get_vec`, which pushes every element of the vector onto the stack
 pub fn get_vec_i(i: u16) -> i32 {
     let op_id = 0x2B;
     op_id | ((i as i32) << 8)
@@ -117,7 +117,7 @@ pub fn alloc_mod_table(n: u16) -> i32 {
     op_id | ((n as i32) << 8)
 }
 
-/// Pushes the `i`th module value onto the stack
+/// Pushes the `i`th module value in the module table onto the stack
 pub fn push_mod(i: u16) -> i32 {
     let op_id = 0x2D;
     op_id | ((i as i32) << 8)
