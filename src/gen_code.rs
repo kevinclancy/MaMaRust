@@ -365,7 +365,7 @@ pub fn code_val_path(
     let (ty, index) = match ctxt.resolve_module_path(prefix)?.lookup_val_layout(field) {
         Some((ty, index)) => (ty.clone(), index),
         None => return Err((
-            format!("module {} has no value component {}", field, prefix),
+            format!("module {} has no value component {}", prefix, field),
             span.clone()
         )),
     };
@@ -375,7 +375,7 @@ pub fn code_val_path(
 
 /// Generate code for a complete program: build the module its components define, then
 /// apply that module's `run` component to the unit value. Returns the type of the result,
-/// which is the return type of `run`
+/// which is the return type of `run`.
 pub fn gen_code_prog(prog: &Prog<Ident>) -> Result<(Ty<Ident>, Vector<i32>), (String, Span)> {
     let mut addr_gen = AddressGenerator::new();
     let fail_addr = addr_gen.fresh_addr();
@@ -736,14 +736,13 @@ pub fn code_v(
             ))
         },
         Expr::Application { fn_expr, args, .. } => {
-            // a call reuses the enclosing frame only when it is in tail position *and*
-            // supplies exactly as many arguments as the enclosing function has formals;
-            // otherwise a mark is emitted, occupying one admin slot beneath the arguments
-            let tail_formals = match ctxt.tail_pos {
-                Some(num_formals) if args.len() == num_formals as usize => Some(num_formals),
-                _ => None,
+            let is_tailcall = match ctxt.tail_pos {
+                Some(num_formals) if args.len() == num_formals as usize =>
+                    true,
+                _ =>
+                    false,
             };
-            let num_admin_elems: u8 = if tail_formals.is_some() { 0 } else { 1 };
+            let num_admin_elems: u8 = if is_tailcall { 0 } else { 1 };
             let (ty_fun, code_fun) = code_v(
                 &Context { tail_pos: None, ..ctxt.clone() },
                 addr_gen,
@@ -775,8 +774,9 @@ pub fn code_v(
                 Vector::new(),
                 |acc, (_, code)| acc + code.clone()
             );
-            match tail_formals {
-                Some(num_formals) => {
+            match is_tailcall {
+                true => {
+                    let Some(num_formals) = ctxt.tail_pos else { unreachable!() };
                     Ok((
                         ty_fun.apply(args.len()),
                         (
@@ -789,7 +789,7 @@ pub fn code_v(
                         )
                     ))
                 },
-                None => {
+                false => {
                     let after_addr = addr_gen.fresh_addr();
                     Ok((
                         ty_fun.apply(args.len()),

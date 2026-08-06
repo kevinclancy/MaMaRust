@@ -21,14 +21,12 @@ pub fn dummy_span() -> Span {
 pub enum Path<Id> {
     /// a lexically-scoped identifier, for a module, type, or term
     RootId{id: Id, span: Span},
-    /// projection of a field out of the module named by `prefix`; `field` is resolved
-    /// against that module's signature rather than lexical scope, so it is never stamped
+    /// projection of a field out of the module named by `prefix`
     Select{prefix: Box<Path<Id>>, field: String, span: Span}
 }
 
 impl Path<Ident> {
-    /// Resolves the module identifier at the root of `path` against the in-scope
-    /// identifiers in `ctxt`, returning the offending name and span if it is unbound
+    /// Replaces a path's lexical identifiers with stamped identifiers
     pub fn stamp_ids(path: &Path<String>, ctxt: &ImHashMap<String, Ident>) -> Result<Path<Ident>, (String, Span)> {
         match path {
             Path::RootId { id, span } => {
@@ -181,9 +179,7 @@ impl Ty<Ident> {
     }
 }
 
-/// Classifies types. A type component of a module signature is abstract when its
-/// kind is `Star` and transparent when its kind is a `Singleton`; sealing a module
-/// weakens `Singleton` to `Star`, which is the only way abstraction is introduced.
+/// Kinds classify types
 #[derive(Debug, Clone, PartialEq)]
 pub enum Kind<Id> {
     /// the kind of proper types whose definition is not known here
@@ -191,8 +187,7 @@ pub enum Kind<Id> {
     /// S(ty), the kind inhabited only by types equivalent to `ty`; a transparent
     /// type definition is recorded with this kind
     Singleton { ty: Box<Ty<Id>>, span: Span },
-    /// the kind of a type function. There is no singleton at arrow kind, so a type
-    /// function's definition is inlined at application sites rather than tracked here
+    /// the kind of a type function
     Arrow { dom: Vec<Kind<Id>>, cod: Box<Kind<Id>>, span: Span },
 }
 
@@ -492,8 +487,6 @@ pub enum Expr<Id> {
         span: Span,
     },
     Var(Id, Span),
-    /// projection of a value component out of a module, e.g. `M.x`; the path's final
-    /// `Select` names the value component and its prefix names the module
     ValPath { path: Path<Id>, span: Span },
     Let {
         bound_pat: Box<Pattern<Id>>,
@@ -747,8 +740,6 @@ impl<Id: Clone + Hash + Eq> Expr<Id> {
                 set
             }
 
-            // a path's root is a module identifier resolved through the module table,
-            // not the variable environment, so a projection captures nothing
             Expr::ValPath { .. } => HashSet::new(),
 
             Expr::Let { bound_pat, bind_to, body, .. } => {
@@ -830,18 +821,13 @@ impl<Id: Clone + Hash + Eq> Expr<Id> {
     }
 }
 
-/// A whole program: the components of a module, written without the enclosing `mod` and
-/// `end`, which must include a value component named `run` of type `() -> int`
 #[derive(Debug, Clone, PartialEq)]
 pub struct Prog<Id> {
     pub fields: Vec<FieldDef<Id>>,
     pub span: Span,
 }
 
-/// A single component of a structure. Components are positionally scoped: each one may
-/// refer to those preceding it, and to nothing that follows. Type and value components
-/// are interleaved in one list rather than stratified, because a type component's kind
-/// can mention any preceding component via a singleton
+/// A single binding in a module.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldDef<Id> {
     /// a value definition, e.g. `val x = 3`
@@ -881,8 +867,6 @@ impl<Id> ModuleTerm<Id> {
 }
 
 impl ModuleTerm<Ident> {
-    /// Stamps a structure's components in order, threading the context forward so that
-    /// each component is stamped under the bindings introduced by its predecessors
     pub fn stamp_ids(module: &ModuleTerm<String>, ctxt: &ImHashMap<String, Ident>)
         -> Result<ModuleTerm<Ident>, (String, Span)>
     {
@@ -907,8 +891,6 @@ impl ModuleTerm<Ident> {
 }
 
 impl FieldDef<Ident> {
-    /// Stamps one component, extending `ctxt` with the identifier it binds so that
-    /// subsequent components in the same structure can refer to it
     pub fn stamp_ids(field: &FieldDef<String>, ctxt: &mut ImHashMap<String, Ident>)
         -> Result<FieldDef<Ident>, (String, Span)>
     {

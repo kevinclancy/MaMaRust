@@ -17,9 +17,8 @@ pub struct VirtualMachine {
   pub ssp: usize,
   /// Globals pointer
   pub gp: HeapAddr,
-  /// Module pointer: the vector of top-level module values, indexed by `PushMod`.
-  /// Kept separate from `gp`, which is scoped to the running closure, because a module
-  /// must be reachable from every call frame without being captured by any closure
+  /// "Modules pointer" to vector of modules reachable via projections from
+  /// top-level modules
   pub mp: HeapAddr,
   /// Frame pointer
   pub fp: usize
