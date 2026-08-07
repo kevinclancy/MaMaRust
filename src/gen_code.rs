@@ -995,7 +995,7 @@ pub fn code_v(
             let (ty, push_var_instr) = get_var(ctxt, name, rng, stack_level)?;
             Ok((
                 ty,
-                vector![push_var_instr, instr::eval()]
+                vector![push_var_instr]
             ))
         },
         Expr::ValPath { path, .. } => code_val_path(ctxt, path),
