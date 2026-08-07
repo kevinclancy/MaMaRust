@@ -1,2 +1,3 @@
-let a = (fun (x : int) -> (fun (y : int) -> x + y)) in
-(a 3 2)
+val run = fun () ->
+    let a = (fun (x : int) -> (fun (y : int) -> x + y)) in
+    (a 3 2)

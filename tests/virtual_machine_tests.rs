@@ -62,6 +62,18 @@ fn run_module_prog(prog_str: &str, expected_result: i32) {
     assert_eq!(result, expected_result);
 }
 
+/// Reads the source of the program held in `tests/programs/<name>.kml`
+fn read_prog(name: &str) -> String {
+    let path = format!("{}/tests/programs/{}.kml", env!("CARGO_MANIFEST_DIR"), name);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("could not read {}: {}", path, e))
+}
+
+/// Runs the program held in `tests/programs/<name>.kml`
+fn run_prog_file(name: &str, expected_result: i32) {
+    run_module_prog(&read_prog(name), expected_result);
+}
+
 /// Asserts that a program in module form fails code generation with a message containing
 /// `expected_msg`
 fn assert_prog_type_error(prog_str: &str, expected_msg: &str) {
@@ -416,61 +428,22 @@ fn module_interleaved_type_fields() {
 
 #[test]
 fn module_sum_type_values() {
-    run_module_prog(
-        "module M = mod \
-            typedef Opt = | Some {contents : int} | None {} \
-            val mk = fun (n : int) -> Some {contents : n} \
-            val get = fun (o : Opt) -> match o with | Some {contents : x} -> x | None {} -> 0 \
-         end \
-         val run = fun () -> M.get (M.mk 5)",
-        5
-    );
+    run_prog_file("module_sum_type_values", 5);
 }
 
 #[test]
 fn nested_module_sum_type() {
-    run_module_prog(
-        "module A = mod \
-            module B = mod \
-                typedef Opt = | Some {contents : int} | None {} \
-                val mk = fun (n : int) -> Some {contents : n} \
-                val get = fun (o : Opt) -> match o with | Some {contents : x} -> x | None {} -> 0 \
-            end \
-            val y = B.get (B.mk 7) \
-         end \
-         val run = fun () -> A.y",
-        7
-    );
+    run_prog_file("nested_module_sum_type", 7);
 }
-
-// Two modules each define a type named `T`. Stamping gives the two `T`s distinct
-// identifiers, so values of one never satisfy a function expecting the other.
-const TWO_MODULES_NAMED_T: &str =
-    "module M = mod \
-        typedef T = | A {v : int} \
-        val mk = fun (n : int) -> A {v : n} \
-        val get = fun (t : T) -> match t with | A {v : x} -> x \
-     end \
-     module N = mod \
-        typedef T = | B {v : int} \
-        val mk = fun (n : int) -> B {v : n} \
-        val get = fun (t : T) -> match t with | B {v : x} -> x \
-     end ";
 
 #[test]
 fn stamping_keeps_same_named_types_usable() {
-    run_module_prog(
-        &format!("{} val run = fun () -> M.get (M.mk 1) + N.get (N.mk 2)", TWO_MODULES_NAMED_T),
-        3
-    );
+    run_prog_file("two_modules_named_t", 3);
 }
 
 #[test]
 fn stamping_rejects_crossed_same_named_types() {
-    assert_prog_type_error(
-        &format!("{} val run = fun () -> M.get (N.mk 2)", TWO_MODULES_NAMED_T),
-        "argument type mismatch"
-    );
+    assert_prog_type_error(&read_prog("two_modules_named_t_crossed"), "argument type mismatch");
 }
 
 #[test]
