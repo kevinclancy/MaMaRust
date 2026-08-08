@@ -1,0 +1,12 @@
+module M = mod
+    typedef t = | Some {contents : int} | None {}
+
+    val mk = fun (n : int) -> Some {contents : n}
+
+    val get = fun (o : t) ->
+        match o with
+        | Some {contents : x} -> x
+        | None {} -> 0
+end
+
+val run = fun () -> M.get (M.mk 5)

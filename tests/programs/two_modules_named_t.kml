@@ -1,0 +1,13 @@
+module M = mod
+    typedef t = | A {v : int}
+    val mk = fun (n : int) -> A {v : n}
+    val get = fun (a : t) -> match a with | A {v : x} -> x
+end
+
+module N = mod
+    typedef t = | B {v : int}
+    val mk = fun (n : int) -> B {v : n}
+    val get = fun (a : t) -> match a with | B {v : x} -> x
+end
+
+val run = fun () -> M.get (M.mk 1) + N.get (N.mk 2)

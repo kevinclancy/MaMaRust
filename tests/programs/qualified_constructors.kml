@@ -1,0 +1,11 @@
+// The constructors of `M`'s sum type are reachable from outside `M`, in both
+// expression and pattern position, by qualifying them with the module name.
+
+module M = mod
+    typedef t = | Some {contents : int} | None {}
+end
+
+val run = fun () ->
+    match M.Some {contents : 40} with
+    | M.Some {contents : x} -> x + 2
+    | M.None {} -> 0
