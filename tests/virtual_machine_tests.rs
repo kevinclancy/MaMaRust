@@ -681,3 +681,83 @@ fn sig_binding_shadows_earlier_binding() {
         0
     );
 }
+
+#[test]
+fn sig_path_selects_from_module() {
+    run_module_prog(
+        "module M = mod signature S = sig type t val f : t -> int end val x = 3 end \
+         signature T = M.S \
+         val run = fun () -> M.x",
+        3
+    );
+}
+
+#[test]
+fn sig_path_selects_through_nested_modules() {
+    run_module_prog(
+        "module A = mod \
+            module B = mod signature S = sig type t end val y = 4 end \
+            val x = B.y \
+         end \
+         signature T = sig module M : A.B.S end \
+         val run = fun () -> A.x",
+        4
+    );
+}
+
+#[test]
+fn sig_path_rejects_non_signature_component() {
+    assert_prog_type_error(
+        "module M = mod val x = 1 end \
+         signature T = M.x \
+         val run = fun () -> 0",
+        "is not a signature"
+    );
+}
+
+#[test]
+fn sig_path_rejects_missing_signature_component() {
+    assert_prog_type_error(
+        "module M = mod val x = 1 end \
+         signature T = M.nosuch \
+         val run = fun () -> 0",
+        "has no signature component"
+    );
+}
+
+#[test]
+fn sig_decl_inside_signature() {
+    run_module_prog(
+        "signature S = sig \
+            signature Inner = sig type t val f : t -> int end \
+            module M : Inner \
+         end \
+         val run = fun () -> 0",
+        0
+    );
+}
+
+// A module *declared* in a signature carries its signature components, so a signature it
+// defines can be selected out of it just as from a defined module.
+#[test]
+fn sig_path_selects_from_declared_module() {
+    run_module_prog(
+        "signature S = sig \
+            module M : sig signature Inner = sig type t end end \
+            module N : M.Inner \
+         end \
+         val run = fun () -> 0",
+        0
+    );
+}
+
+#[test]
+fn sig_decl_rejects_ill_formed_body() {
+    assert_prog_type_error(
+        "signature S = sig \
+            signature Inner = sig val x : int val f : x -> int end \
+         end \
+         val run = fun () -> 0",
+        "unbound type identifier"
+    );
+}

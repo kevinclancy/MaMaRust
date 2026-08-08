@@ -85,9 +85,7 @@ pub struct Context {
     pub var_ctxt: HashMap<Ident, VarContextEntry>,
     /// Maps each type name in context to its kind
     pub ty_ctxt: HashMap<Ident, Kind<Ident>>,
-    /// Maps each module identifier in context to the signature it denotes. A module
-    /// declared by a signature appears here but not in `mod_addr_ctxt`, since a
-    /// declaration describes a module without bringing one into existence
+    /// Maps each module identifier in context to the signature it denotes
     pub mod_sig_ctxt: HashMap<Ident, Signature>,
     /// Maps each module identifier that denotes an actual module to the location of its
     /// runtime vector
@@ -161,6 +159,31 @@ impl Context {
         }
     }
 
+    /// Resolves a dotted path to the signature it names, looking the root up in scope and
+    /// then walking into the signature of each module prefix in turn
+    pub fn resolve_sig_path(&self, path: &Path<Ident>) -> Result<&Signature, (String, Span)> {
+        match path {
+            Path::RootId { id, span } => {
+                self.sig_ctxt.get(id).ok_or_else(|| {
+                    (format!("unbound signature identifier: {}", id), span.clone())
+                })
+            },
+            Path::Select { prefix, field, span } => {
+                match self.resolve_module_path(prefix)?.lookup(field) {
+                    Some(SigComponent::Sig { sig }) => Ok(sig),
+                    Some(_) => Err((
+                        format!("component {} of module {} is not a signature", field, prefix),
+                        span.clone()
+                    )),
+                    None => Err((
+                        format!("module {} has no signature component {}", prefix, field),
+                        span.clone()
+                    )),
+                }
+            }
+        }
+    }
+
     /// Resolves a dotted path to the sum type it names,
     /// or returns `None` if the path is illegal or names something other than a sum type
     pub fn resolve_sum_ty(&self, path: &Path<Ident>) -> Result<Option<&Ty<Ident>>, (String, Span)> {
@@ -177,21 +200,21 @@ impl Context {
 /// Checks that `ty` is well-formed in `ctxt` and synthesizes the kind that classifies it
 pub fn kind_synth(ctxt: &Context, ty: &Ty<Ident>) -> Result<Kind<Ident>, (String, Span)> {
     match ty {
-        Ty::IntTy(span) => Ok(Kind::Star { span: span.clone() }),
+        Ty::IntTy(span) => Ok(Kind::Singleton { ty: Box::new(ty.clone()), span: span.clone() }),
         Ty::FunTy { dom, cod, span } => {
             check_proper_ty(ctxt, dom)?;
             check_proper_ty(ctxt, cod)?;
-            Ok(Kind::Star { span: span.clone() })
+            Ok(Kind::Singleton { ty: Box::new(ty.clone()), span: span.clone() })
         },
         Ty::ProdTy { components, span } => {
             for component in components {
                 check_proper_ty(ctxt, component)?;
             }
-            Ok(Kind::Star { span: span.clone() })
+            Ok(Kind::Singleton { ty: Box::new(ty.clone()), span: span.clone() })
         },
         Ty::RefTy { contained_ty, span } => {
             check_proper_ty(ctxt, contained_ty)?;
-            Ok(Kind::Star { span: span.clone() })
+            Ok(Kind::Singleton { ty: Box::new(ty.clone()), span: span.clone() })
         },
         Ty::SumTy { variants, range, .. } => {
             for fields in variants.values() {
@@ -199,13 +222,17 @@ pub fn kind_synth(ctxt: &Context, ty: &Ty<Ident>) -> Result<Kind<Ident>, (String
                     check_proper_ty(ctxt, field_ty)?;
                 }
             }
-            Ok(Kind::Star { span: range.clone() })
+            Ok(Kind::Singleton { ty: Box::new(ty.clone()), span: range.clone() })
         },
-        Ty::IdTy { path, .. } => Ok(ctxt.resolve_ty_path(path)?.clone()),
+        Ty::IdTy { path, .. } => {
+            let bound_kind = ctxt.resolve_ty_path(path)?.clone();
+            Ok(selfify(ty, bound_kind))
+        },
         Ty::VarTy { name, span } => {
-            ctxt.ty_ctxt.get(name).cloned().ok_or_else(|| {
+            let bound_kind = ctxt.ty_ctxt.get(name).cloned().ok_or_else(|| {
                 (format!("unbound type variable: {}", name), span.clone())
-            })
+            })?;
+            Ok(selfify(ty, bound_kind))
         },
         Ty::TyFunTy { dom, cod, span } => {
             let mut inner_ctxt = ctxt.clone();
@@ -237,13 +264,27 @@ pub fn kind_synth(ctxt: &Context, ty: &Ty<Ident>) -> Result<Kind<Ident>, (String
             for arg in args {
                 check_proper_ty(ctxt, arg)?;
             }
-            Ok(*cod)
+            Ok(selfify(ty, *cod))
         },
     }
 }
 
-/// Checks that `ty` is well-formed in `ctxt` and classifies a proper type rather than a
-/// type function. A singleton kind is accepted, being a subkind of `Star`
+/// The most precise kind classifying `ty`, given a kind already known to classify it.
+///
+/// A proper type is classified by the singleton at itself, which is a subkind of every
+/// other kind classifying it, so that is the principal choice. This holds even for an
+/// abstract type: `S(t)` says only that a type equals `t`, revealing no definition. A type
+/// function has no singleton kind, so its kind is returned unchanged
+fn selfify(ty: &Ty<Ident>, kind: Kind<Ident>) -> Kind<Ident> {
+    match kind {
+        Kind::Star { span } | Kind::Singleton { span, .. } => {
+            Kind::Singleton { ty: Box::new(ty.clone()), span }
+        },
+        arrow @ Kind::Arrow { .. } => arrow,
+    }
+}
+
+/// Checks that `ty` is well-formed in `ctxt` and classifies a proper type
 pub fn check_proper_ty(ctxt: &Context, ty: &Ty<Ident>) -> Result<(), (String, Span)> {
     match kind_synth(ctxt, ty)? {
         Kind::Star { .. } | Kind::Singleton { .. } => Ok(()),
@@ -254,8 +295,7 @@ pub fn check_proper_ty(ctxt: &Context, ty: &Ty<Ident>) -> Result<(), (String, Sp
     }
 }
 
-/// Checks that `kind` is well-formed in `ctxt`, which for a singleton means checking the
-/// type it is inhabited by
+/// Checks that `kind` is well-formed in `ctxt`
 pub fn check_kind_wf(ctxt: &Context, kind: &Kind<Ident>) -> Result<(), (String, Span)> {
     match kind {
         Kind::Star { .. } => Ok(()),
@@ -270,23 +310,9 @@ pub fn check_kind_wf(ctxt: &Context, kind: &Kind<Ident>) -> Result<(), (String, 
 }
 
 /// Checks that `sig` is well-formed in `ctxt` and returns the signature it denotes.
-///
-/// A signature's declarations are a telescope, so each is checked in a context extended
-/// with the ones preceding it. Value and submodule declarations take runtime slots in
-/// declaration order, giving the layout that a module matching this signature must have
 pub fn check_sig(ctxt: &Context, sig: &SigExpr<Ident>) -> Result<Signature, (String, Span)> {
     match sig {
-        SigExpr::SigPath { path, span } => {
-            let Path::RootId { id, .. } = path else {
-                return Err((
-                    format!("{} does not name a signature", path),
-                    span.clone()
-                ));
-            };
-            ctxt.sig_ctxt.get(id).cloned().ok_or_else(|| {
-                (format!("unbound signature identifier: {}", id), span.clone())
-            })
-        },
+        SigExpr::SigPath { path, .. } => Ok(ctxt.resolve_sig_path(path)?.clone()),
         SigExpr::Sig { decls, .. } => {
             let mut inner_ctxt = ctxt.clone();
             let mut components: Vec<(String, SigComponent)> = Vec::new();
@@ -316,6 +342,15 @@ pub fn check_sig(ctxt: &Context, sig: &SigExpr<Ident>) -> Result<Signature, (Str
                             SigComponent::Mod { sig: sub_sig, index: num_slots }
                         ));
                         num_slots += 1;
+                    },
+                    SigDecl::SigDecl { id, sig: named_sig, .. } => {
+                        let named_sig = check_sig(&inner_ctxt, named_sig)?;
+                        inner_ctxt.sig_ctxt =
+                            inner_ctxt.sig_ctxt.update(id.clone(), named_sig.clone());
+                        components.push((
+                            id.name.clone(),
+                            SigComponent::Sig { sig: named_sig }
+                        ));
                     },
                 }
             }
@@ -425,7 +460,9 @@ pub fn code_module(
                     },
                     FieldDef::SigDef { id, sig, .. } => {
                         let checked = check_sig(&inner_ctxt, sig)?;
-                        inner_ctxt.sig_ctxt = inner_ctxt.sig_ctxt.update(id.clone(), checked);
+                        inner_ctxt.sig_ctxt =
+                            inner_ctxt.sig_ctxt.update(id.clone(), checked.clone());
+                        components.push((id.name.clone(), SigComponent::Sig { sig: checked }));
                     }
                 }
             }

@@ -103,6 +103,8 @@ pub enum SigComponent {
     Val { ty: Ty<Ident>, index: u16 },
     /// a submodule, its signature, and its index in the enclosing module's runtime vector
     Mod { sig: Signature, index: u16 },
+    /// a signature definition, which like a type declaration has no runtime content
+    Sig { sig: Signature },
 }
 
 /// The components a module exports, as a telescope: each component may refer to those
@@ -134,6 +136,14 @@ impl Signature {
     pub fn lookup_mod_layout(&self, field: &str) -> Option<(&Signature, u16)> {
         match self.lookup(field)? {
             SigComponent::Mod { sig, index } => Some((sig, *index)),
+            _ => None,
+        }
+    }
+
+    /// Get the signature denoted by a signature definition component
+    pub fn lookup_sig(&self, field: &str) -> Option<&Signature> {
+        match self.lookup(field)? {
+            SigComponent::Sig { sig } => Some(sig),
             _ => None,
         }
     }
@@ -914,13 +924,15 @@ pub enum SigDecl<Id> {
     ValDecl{id: Id, ty: Ty<Id>, span: Span},
     /// a submodule declaration, e.g. `module M : sig ... end`
     ModDecl{id: Id, sig: SigExpr<Id>, span: Span},
+    /// a signature definition, e.g. `signature S = sig ... end`
+    SigDecl{id: Id, sig: SigExpr<Id>, span: Span},
 }
 
 impl<Id> SigDecl<Id> {
     pub fn span(&self) -> &Span {
         match self {
             SigDecl::TyDecl { span, .. } | SigDecl::ValDecl { span, .. }
-            | SigDecl::ModDecl { span, .. } => span,
+            | SigDecl::ModDecl { span, .. } | SigDecl::SigDecl { span, .. } => span,
         }
     }
 }
@@ -990,6 +1002,12 @@ impl SigDecl<Ident> {
                 let ident = Ident::new(id.clone());
                 ctxt.insert(id.clone(), ident.clone());
                 Ok(SigDecl::ModDecl { id: ident, sig: new_sig, span: span.clone() })
+            },
+            SigDecl::SigDecl { id, sig, span } => {
+                let new_sig = SigExpr::stamp_ids(sig, ctxt)?;
+                let ident = Ident::new(id.clone());
+                ctxt.insert(id.clone(), ident.clone());
+                Ok(SigDecl::SigDecl { id: ident, sig: new_sig, span: span.clone() })
             }
         }
     }

@@ -592,8 +592,14 @@ pub fn sig_parser() -> impl Parser<Token, SigExpr<String>, Error = Simple<Token>
             .then(sig_expr.clone())
             .map_with_span(|(id, sig), span| SigDecl::ModDecl { id, sig, span });
 
+        let sig_decl = just(Token::Signature)
+            .ignore_then(select! { Token::Constructor(id) => id })
+            .then_ignore(just(Token::Bind))
+            .then(sig_expr.clone())
+            .map_with_span(|(id, sig), span| SigDecl::SigDecl { id, sig, span });
+
         just(Token::Sig)
-            .ignore_then(choice((ty_decl, val_decl, mod_decl)).repeated())
+            .ignore_then(choice((ty_decl, val_decl, mod_decl, sig_decl)).repeated())
             .then_ignore(just(Token::End))
             .map_with_span(|decls, span| SigExpr::Sig { decls, span })
             .or(path_parser().map_with_span(|path, span| SigExpr::SigPath { path, span }))
