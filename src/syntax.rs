@@ -26,19 +26,24 @@ pub enum Path<Id> {
 }
 
 impl Path<Ident> {
-    /// Replaces a path's lexical identifiers with stamped identifiers
-    pub fn stamp_ids(path: &Path<String>, ctxt: &ImHashMap<String, Ident>) -> Result<Path<Ident>, (String, Span)> {
+    /// Replaces a path's lexical identifiers with stamped identifiers. `root_desc` names
+    /// what the path's root denotes, and appears in the error reported when it is unbound;
+    /// the prefix of a projection always denotes a module, whatever the whole path denotes
+    pub fn stamp_ids(path: &Path<String>, ctxt: &ImHashMap<String, Ident>, root_desc: &str)
+        -> Result<Path<Ident>, (String, Span)>
+    {
         match path {
             Path::RootId { id, span } => {
-                let ident = ctxt.get(id)
-                    .ok_or_else(|| (format!("unbound module identifier: {}", id), span.clone()))?;
+                let ident = ctxt.get(id).ok_or_else(|| {
+                    (format!("unbound {} identifier: {}", root_desc, id), span.clone())
+                })?;
                 Ok(Path::RootId {
                     id: ident.clone(),
                     span: span.clone(),
                 })
             },
             Path::Select { prefix, field, span } => Ok(Path::Select {
-                prefix: Box::new(Path::stamp_ids(prefix, ctxt)?),
+                prefix: Box::new(Path::stamp_ids(prefix, ctxt, "module")?),
                 field: field.clone(),
                 span: span.clone(),
             }),
@@ -88,6 +93,52 @@ pub struct Variant<Id> {
     pub fields: Vec<(String, Ty<Id>, Span)>
 }
 
+/// What a single module component declares. Mirrors the `FieldDef` variants of the
+/// module it came from
+#[derive(Debug, Clone, PartialEq)]
+pub enum SigComponent {
+    /// a type declaration or, if the kind is a singleton, a defintion
+    Ty { kind: Kind<Ident> },
+    /// a term declaration, its type, and its index in the module's runtime vector
+    Val { ty: Ty<Ident>, index: u16 },
+    /// a submodule, its signature, and its index in the enclosing module's runtime vector
+    Mod { sig: Signature, index: u16 },
+}
+
+/// The components a module exports, as a telescope: each component may refer to those
+/// preceding it
+#[derive(Debug, Clone, PartialEq)]
+pub struct Signature {
+    /// the exported components, in declaration order
+    pub components: Vec<(String, SigComponent)>,
+}
+
+impl Signature {
+    /// Looks up the last component whose name matches `field`
+    pub fn lookup(&self, field: &str) -> Option<&SigComponent> {
+        self.components.iter()
+            .rev()
+            .find(|(name, _)| name == field)
+            .map(|(_, component)| component)
+    }
+
+    /// Get the type and runtime slot index of a term component
+    pub fn lookup_val_layout(&self, field: &str) -> Option<(&Ty<Ident>, u16)> {
+        match self.lookup(field)? {
+            SigComponent::Val { ty, index } => Some((ty, *index)),
+            _ => None,
+        }
+    }
+
+    /// Get the signature and runtime slot index of a submodule component
+    pub fn lookup_mod_layout(&self, field: &str) -> Option<(&Signature, u16)> {
+        match self.lookup(field)? {
+            SigComponent::Mod { sig, index } => Some((sig, *index)),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ty<Id> {
     IntTy(Span),
@@ -107,6 +158,18 @@ pub enum Ty<Id> {
     VarTy { name: Id, span: Span },
     TyFunTy { dom: Vec<Id>, cod:Box<Ty<Id>>, span: Span },
     TyAppTy { args: Vec<Box<Ty<Id>>>, ty_fn: Box<Ty<Id>>, span: Span  }
+}
+
+impl<Id> Ty<Id> {
+    pub fn span(&self) -> &Span {
+        match self {
+            Ty::IntTy(span) => span,
+            Ty::FunTy { span, .. } | Ty::ProdTy { span, .. } | Ty::RefTy { span, .. }
+            | Ty::IdTy { span, .. } | Ty::VarTy { span, .. } | Ty::TyFunTy { span, .. }
+            | Ty::TyAppTy { span, .. } => span,
+            Ty::SumTy { range, .. } => range,
+        }
+    }
 }
 
 impl Ty<Ident> {
@@ -143,7 +206,7 @@ impl Ty<Ident> {
             },
             Ty::IdTy { path, span } => {
                 Ok(Ty::IdTy {
-                    path: Path::stamp_ids(path, ctxt)?,
+                    path: Path::stamp_ids(path, ctxt, "type")?,
                     span: span.clone(),
                 })
             },
@@ -564,7 +627,7 @@ impl Expr<Ident> {
                 Ok(Expr::Var(ident.clone(), span.clone()))
             }
             Expr::ValPath { path, span } => Ok(Expr::ValPath {
-                path: Path::stamp_ids(path, ctxt)?,
+                path: Path::stamp_ids(path, ctxt, "value")?,
                 span: span.clone(),
             }),
             Expr::Int(n, span) => Ok(Expr::Int(*n, span.clone())),
@@ -837,14 +900,106 @@ pub enum FieldDef<Id> {
     /// a discriminated union definition, which also brings its constructors into scope
     SumTypeDef{def: SumTypeDef<Id>},
     /// a submodule definition, e.g. `module M = struct ... end`
-    ModDef{id: Id, module: ModuleTerm<Id>, span: Span}
+    ModDef{id: Id, module: ModuleTerm<Id>, span: Span},
+    /// a module signature definition
+    SigDef{id: Id, sig: SigExpr<Id>, span: Span}
+}
+
+/// A component declared in a signature, as written in source
+#[derive(Debug, Clone, PartialEq)]
+pub enum SigDecl<Id> {
+    /// `type t` when the kind is `Star`, or `type t = ty` when it is a singleton
+    TyDecl{id: Id, kind: Kind<Id>, span: Span},
+    /// a value declaration, e.g. `val x : int`
+    ValDecl{id: Id, ty: Ty<Id>, span: Span},
+    /// a submodule declaration, e.g. `module M : sig ... end`
+    ModDecl{id: Id, sig: SigExpr<Id>, span: Span},
+}
+
+impl<Id> SigDecl<Id> {
+    pub fn span(&self) -> &Span {
+        match self {
+            SigDecl::TyDecl { span, .. } | SigDecl::ValDecl { span, .. }
+            | SigDecl::ModDecl { span, .. } => span,
+        }
+    }
+}
+
+/// A signature as written in source, before elaboration into a `Signature`
+#[derive(Debug, Clone, PartialEq)]
+pub enum SigExpr<Id> {
+    /// a literal signature, written `sig ... end`, whose declarations are scoped
+    /// positionally in the same way a module's components are
+    Sig{decls: Vec<SigDecl<Id>>, span: Span},
+    /// a reference to a signature bound by an earlier definition
+    SigPath{path: Path<Id>, span: Span},
+}
+
+impl<Id> SigExpr<Id> {
+    pub fn span(&self) -> &Span {
+        match self {
+            SigExpr::Sig { span, .. } | SigExpr::SigPath { span, .. } => span,
+        }
+    }
+}
+
+impl SigExpr<Ident> {
+    /// Stamps a signature's declarations in order, threading the context forward so that
+    /// each declaration is stamped under the type names its predecessors introduce
+    pub fn stamp_ids(sig: &SigExpr<String>, ctxt: &ImHashMap<String, Ident>)
+        -> Result<SigExpr<Ident>, (String, Span)>
+    {
+        match sig {
+            SigExpr::SigPath { path, span } => Ok(SigExpr::SigPath {
+                path: Path::stamp_ids(path, ctxt, "signature")?,
+                span: span.clone(),
+            }),
+            SigExpr::Sig { decls, span } => {
+                let mut inner_ctxt = ctxt.clone();
+                let mut new_decls = Vec::new();
+                for decl in decls {
+                    new_decls.push(SigDecl::stamp_ids(decl, &mut inner_ctxt)?);
+                }
+                Ok(SigExpr::Sig { decls: new_decls, span: span.clone() })
+            }
+        }
+    }
+}
+
+impl SigDecl<Ident> {
+    /// Stamps one declaration, extending `ctxt` with the identifier it binds so that
+    /// subsequent declarations in the same signature can refer to it
+    pub fn stamp_ids(decl: &SigDecl<String>, ctxt: &mut ImHashMap<String, Ident>)
+        -> Result<SigDecl<Ident>, (String, Span)>
+    {
+        match decl {
+            SigDecl::TyDecl { id, kind, span } => {
+                let new_kind = Kind::stamp_ids(kind, ctxt)?;
+                let ident = Ident::new(id.clone());
+                ctxt.insert(id.clone(), ident.clone());
+                Ok(SigDecl::TyDecl { id: ident, kind: new_kind, span: span.clone() })
+            },
+            SigDecl::ValDecl { id, ty, span } => {
+                let new_ty = Ty::stamp_ids(ty, ctxt)?;
+                let ident = Ident::new(id.clone());
+                ctxt.insert(id.clone(), ident.clone());
+                Ok(SigDecl::ValDecl { id: ident, ty: new_ty, span: span.clone() })
+            },
+            SigDecl::ModDecl { id, sig, span } => {
+                let new_sig = SigExpr::stamp_ids(sig, ctxt)?;
+                let ident = Ident::new(id.clone());
+                ctxt.insert(id.clone(), ident.clone());
+                Ok(SigDecl::ModDecl { id: ident, sig: new_sig, span: span.clone() })
+            }
+        }
+    }
 }
 
 impl<Id> FieldDef<Id> {
     pub fn span(&self) -> &Span {
         match self {
             FieldDef::ValDef { span, .. } | FieldDef::TyDef { span, .. }
-            | FieldDef::ModDef { span, .. } => span,
+            | FieldDef::ModDef { span, .. } | FieldDef::SigDef { span, .. } => span,
             FieldDef::SumTypeDef { def } => &def.span,
         }
     }
@@ -872,7 +1027,7 @@ impl ModuleTerm<Ident> {
     {
         match module {
             ModuleTerm::ModulePath { path, span } => Ok(ModuleTerm::ModulePath {
-                path: Path::stamp_ids(path, ctxt)?,
+                path: Path::stamp_ids(path, ctxt, "module")?,
                 span: span.clone(),
             }),
             ModuleTerm::Mod { fields, span } => {
@@ -917,6 +1072,12 @@ impl FieldDef<Ident> {
                 let ident = Ident::new(id.clone());
                 ctxt.insert(id.clone(), ident.clone());
                 Ok(FieldDef::ModDef { id: ident, module: new_module, span: span.clone() })
+            },
+            FieldDef::SigDef { id, sig, span } => {
+                let new_sig = SigExpr::stamp_ids(sig, ctxt)?;
+                let ident = Ident::new(id.clone());
+                ctxt.insert(id.clone(), ident.clone());
+                Ok(FieldDef::SigDef { id: ident, sig: new_sig, span: span.clone() })
             }
         }
     }

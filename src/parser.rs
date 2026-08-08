@@ -49,6 +49,8 @@ pub enum Token {
     To,
     Mod,
     End,
+    Sig,
+    Signature,
     Val,
     Type,
     Module,
@@ -82,6 +84,8 @@ pub fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = Simple<char>> {
             "typedef" => Token::Typedef,
             "mod" => Token::Mod,
             "end" => Token::End,
+            "sig" => Token::Sig,
+            "signature" => Token::Signature,
             "val" => Token::Val,
             "type" => Token::Type,
             "module" => Token::Module,
@@ -550,7 +554,7 @@ pub fn typedef_parser() -> impl Parser<Token, SumTypeDef<String>, Error = Simple
         .map(|(constructor_name, fields)| Variant { constructor_name, fields });
 
     just(Token::Typedef)
-        .ignore_then(select! { Token::Constructor(typename) => typename })
+        .ignore_then(select! { Token::Id(typename) => typename })
         .then_ignore(just(Token::Bind))
         .then(variant.repeated().at_least(1))
         .map_with_span(|(typename, variants), span| SumTypeDef {
@@ -560,8 +564,44 @@ pub fn typedef_parser() -> impl Parser<Token, SumTypeDef<String>, Error = Simple
         })
 }
 
-/// Parses the components of a module: `val x = e`, `type t = ty`, a `typedef`, or a
-/// nested `module M = mod ... end`
+/// Parses a signature, either written literally as `sig ... end` or named by a path.
+/// A literal signature declares types with `type t` or `type t = ty`, values with
+/// `val x : ty`, and submodules with `module M : ...`
+pub fn sig_parser() -> impl Parser<Token, SigExpr<String>, Error = Simple<Token>> + Clone {
+    recursive(|sig_expr| {
+        let ty_decl = just(Token::Type)
+            .ignore_then(select! { Token::Id(id) => id })
+            .then(just(Token::Bind).ignore_then(type_parser()).or_not())
+            .map_with_span(|(id, definition), span: Span| {
+                let kind = match definition {
+                    Some(ty) => Kind::Singleton { ty: Box::new(ty), span: span.clone() },
+                    None => Kind::Star { span: span.clone() },
+                };
+                SigDecl::TyDecl { id, kind, span }
+            });
+
+        let val_decl = just(Token::Val)
+            .ignore_then(select! { Token::Id(id) => id })
+            .then_ignore(just(Token::Colon))
+            .then(type_parser())
+            .map_with_span(|(id, ty), span| SigDecl::ValDecl { id, ty, span });
+
+        let mod_decl = just(Token::Module)
+            .ignore_then(select! { Token::Constructor(id) => id })
+            .then_ignore(just(Token::Colon))
+            .then(sig_expr.clone())
+            .map_with_span(|(id, sig), span| SigDecl::ModDecl { id, sig, span });
+
+        just(Token::Sig)
+            .ignore_then(choice((ty_decl, val_decl, mod_decl)).repeated())
+            .then_ignore(just(Token::End))
+            .map_with_span(|decls, span| SigExpr::Sig { decls, span })
+            .or(path_parser().map_with_span(|path, span| SigExpr::SigPath { path, span }))
+    })
+}
+
+/// Parses the components of a module: `val x = e`, `type t = ty`, a `typedef`, a nested
+/// `module M = mod ... end`, or a `signature S = sig ... end`
 pub fn field_def_parser() -> impl Parser<Token, FieldDef<String>, Error = Simple<Token>> + Clone {
     recursive(|field_def| {
         let module_term = just(Token::Mod)
@@ -588,10 +628,17 @@ pub fn field_def_parser() -> impl Parser<Token, FieldDef<String>, Error = Simple
             .then(module_term)
             .map_with_span(|(id, module), span| FieldDef::ModDef { id, module, span });
 
+        let sig_def = just(Token::Signature)
+            .ignore_then(select! { Token::Constructor(id) => id })
+            .then_ignore(just(Token::Bind))
+            .then(sig_parser())
+            .map_with_span(|(id, sig), span| FieldDef::SigDef { id, sig, span });
+
         choice((
             val_def,
             ty_def,
             mod_def,
+            sig_def,
             typedef_parser().map(|def| FieldDef::SumTypeDef { def }),
         ))
     })
@@ -890,7 +937,7 @@ mod tests {
 
     #[test]
     fn test_parse_typedef() {
-        let input = "typedef Option = | Some {contents : int} | None {}";
+        let input = "typedef option = | Some {contents : int} | None {}";
         let tokens = lexer().parse(input).unwrap();
         let len = input.len();
         let stream = Stream::from_iter(len..len + 1, tokens.into_iter());
@@ -898,7 +945,7 @@ mod tests {
         assert!(result.is_ok());
         match result.unwrap() {
             SumTypeDef { typename, variants, .. } => {
-                assert_eq!(typename, "Option");
+                assert_eq!(typename, "option");
                 assert_eq!(variants.len(), 2);
                 assert_eq!(variants[0].fields.len(), 1);
                 assert_eq!(variants[1].fields.len(), 0);
@@ -908,7 +955,7 @@ mod tests {
 
     #[test]
     fn test_parse_prog_with_typedef() {
-        let input = "typedef Bool = | True {b : int} | False {b : int}\nval run = fun () -> 42";
+        let input = "typedef bool = | True {b : int} | False {b : int}\nval run = fun () -> 42";
         let result = parse_prog(input);
         assert!(result.is_ok());
         let prog = result.unwrap();
@@ -1152,4 +1199,49 @@ mod tests {
         assert!(tokens == vec![Token::Int(3), Token::Plus, Token::Int(2)]);
     }
 
+
+    #[test]
+    fn test_parse_signature_def() {
+        let input = r#"
+            signature S = sig
+                type t
+                type u = int
+                val x : int
+                val f : t -> u
+                module Inner : sig
+                    type v
+                    val g : v -> int
+                end
+            end
+
+            val run = fun () -> 0
+        "#;
+        let prog = parse_prog(input).unwrap();
+        assert_eq!(prog.fields.len(), 2);
+        let FieldDef::SigDef { id, sig, .. } = &prog.fields[0] else {
+            panic!("Expected a signature definition")
+        };
+        assert_eq!(id, "S");
+        let SigExpr::Sig { decls, .. } = sig else {
+            panic!("Expected a literal signature")
+        };
+        assert_eq!(decls.len(), 5);
+        assert!(matches!(&decls[0], SigDecl::TyDecl { kind: Kind::Star { .. }, .. }));
+        assert!(matches!(&decls[1], SigDecl::TyDecl { kind: Kind::Singleton { .. }, .. }));
+        assert!(matches!(&decls[2], SigDecl::ValDecl { .. }));
+        assert!(matches!(&decls[3], SigDecl::ValDecl { .. }));
+        assert!(matches!(&decls[4], SigDecl::ModDecl { .. }));
+    }
+
+    #[test]
+    fn test_parse_named_signature() {
+        let input = "signature S = sig type t end \
+                     signature T = S \
+                     val run = fun () -> 0";
+        let prog = parse_prog(input).unwrap();
+        let FieldDef::SigDef { sig, .. } = &prog.fields[1] else {
+            panic!("Expected a signature definition")
+        };
+        assert!(matches!(sig, SigExpr::SigPath { .. }));
+    }
 }

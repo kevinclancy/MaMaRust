@@ -74,13 +74,13 @@ fn run_prog_file(name: &str, expected_result: i32) {
     run_module_prog(&read_prog(name), expected_result);
 }
 
-/// Asserts that a program in module form fails code generation with a message containing
-/// `expected_msg`
+/// Asserts that a program in module form is rejected with a message containing
+/// `expected_msg`, either while stamping identifiers or during code generation
 fn assert_prog_type_error(prog_str: &str, expected_msg: &str) {
     let prog = parse_prog(prog_str).unwrap();
-    let prog2 = Prog::stamp_ids(&prog).unwrap();
-    match gen_code_prog(&prog2) {
-        Ok(_) => panic!("expected a type error, but the program compiled"),
+    let outcome = Prog::stamp_ids(&prog).and_then(|stamped| gen_code_prog(&stamped));
+    match outcome {
+        Ok(_) => panic!("expected a compile error, but the program compiled"),
         Err((msg, _)) => assert!(msg.contains(expected_msg)),
     }
 }
@@ -210,7 +210,7 @@ fn test_assign() {
 #[test]
 fn test_match() {
     run_test_prog(
-        "typedef Option = | Some {contents : int} | None {} \
+        "typedef option = | Some {contents : int} | None {} \
          match Some {contents : 5} with | Some {contents : x} -> x | None {} -> 0",
         5
     );
@@ -239,7 +239,7 @@ fn test_assign_add() {
 #[test]
 fn test_match2() {
     run_test_prog(
-        "typedef Option = | Some {contents : int} | None {} \
+        "typedef option = | Some {contents : int} | None {} \
          match Some {contents : 42} with | Some {contents : x} -> x | None {} -> 0",
         42
     );
@@ -273,7 +273,7 @@ fn test_match_catch_all_guard() {
 #[test]
 fn test_let_constructor_pattern() {
     run_test_prog(
-        "typedef Option = | Some {contents : int} | None {} \
+        "typedef option = | Some {contents : int} | None {} \
          let Some {contents : x} = Some {contents : 42} in x",
         42
     );
@@ -282,7 +282,7 @@ fn test_let_constructor_pattern() {
 #[test]
 fn test_let_constructor_pattern_add_fields() {
     run_test_prog(
-        "typedef Pair = | MkPair {fst : int, snd : int} \
+        "typedef pair = | MkPair {fst : int, snd : int} \
          let MkPair {fst : a, snd : b} = MkPair {fst : 3, snd : 4} in a + b",
         7
     );
@@ -291,7 +291,7 @@ fn test_let_constructor_pattern_add_fields() {
 #[test]
 fn test_let_constructor_pattern_tuple_fields() {
     run_test_prog(
-        "typedef Pair = | MkPair {fst : (int, int, int), snd : (int, int, int)} \
+        "typedef pair = | MkPair {fst : (int, int, int), snd : (int, int, int)} \
          let MkPair {fst : (a, b, c), snd : (d, e, f)} = MkPair {fst : (1, 2, 3), snd : (4, 5, 6)} in a + b + c + d + e + f",
         21
     );
@@ -300,7 +300,7 @@ fn test_let_constructor_pattern_tuple_fields() {
 #[test]
 fn test_let_constructor_nested_tuple() {
     run_test_prog(
-        "typedef Wrapper = | Wrap {contents : (int, int)} \
+        "typedef wrapper = | Wrap {contents : (int, int)} \
          let Wrap {contents : (x, y)} = Wrap {contents : (10, 20)} in x + y",
         30
     );
@@ -314,7 +314,7 @@ fn cbv_application() {
 #[test]
 fn cbv_constructor() {
     run_test_prog(
-        "typedef Option = | Some {contents : int} | None {} \
+        "typedef option = | Some {contents : int} | None {} \
          let z = ref 0 in z := !z + 1; let q = (Some { contents : !z }) in 1",
     1);
 }
@@ -418,7 +418,7 @@ fn module_interleaved_type_fields() {
         "module M = mod \
             type t = int \
             val a = 10 \
-            typedef Opt = | None {} \
+            typedef opt = | None {} \
             val b = 20 \
          end \
          val run = fun () -> M.a + M.b",
@@ -450,10 +450,10 @@ fn stamping_rejects_crossed_same_named_types() {
 fn stamping_keeps_shadowed_type_live() {
     run_module_prog(
         "module M = mod \
-            typedef T = | A {v : int} \
-            val fromOld = fun (t : T) -> match t with | A {v : x} -> x \
+            typedef t = | A {v : int} \
+            val fromOld = fun (a : t) -> match a with | A {v : x} -> x \
             val oldVal = fromOld (A {v : 41}) \
-            typedef T = | B {v : int} \
+            typedef t = | B {v : int} \
             val mkNew = fun (n : int) -> B {v : n} \
             val newVal = match mkNew 1 with | B {v : x} -> x \
          end \
@@ -466,9 +466,9 @@ fn stamping_keeps_shadowed_type_live() {
 fn stamping_rejects_shadowed_type_confusion() {
     assert_prog_type_error(
         "module M = mod \
-            typedef T = | A {v : int} \
-            val fromOld = fun (t : T) -> match t with | A {v : x} -> x \
-            typedef T = | B {v : int} \
+            typedef t = | A {v : int} \
+            val fromOld = fun (a : t) -> match a with | A {v : x} -> x \
+            typedef t = | B {v : int} \
             val mkNew = fun (n : int) -> B {v : n} \
             val bad = fromOld (mkNew 1) \
          end \
@@ -508,10 +508,10 @@ fn shadowed_val_agrees_inside_and_outside() {
 fn shadowed_type_resolves_to_last() {
     run_module_prog(
         "module M = mod \
-            typedef T = | A {v : int} \
-            typedef T = | B {v : int} \
+            typedef t = | A {v : int} \
+            typedef t = | B {v : int} \
             val mk = fun (n : int) -> B {v : n} \
-            val get = fun (t : T) -> match t with | B {v : x} -> x \
+            val get = fun (a : t) -> match a with | B {v : x} -> x \
          end \
          val run = fun () -> M.get (M.mk 7)",
         7
@@ -527,5 +527,157 @@ fn nested_module_referenced_from_closure() {
          end \
          val run = fun () -> A.f 3",
         10
+    );
+}
+
+#[test]
+fn signature_wf_accepts_telescoping_decls() {
+    run_module_prog(
+        "signature S = sig \
+            type t \
+            type u = int \
+            val x : u \
+            val f : t -> u \
+            module Inner : sig type v val g : v -> int end \
+         end \
+         val run = fun () -> 0",
+        0
+    );
+}
+
+// A declaration may refer to a type component of a submodule declared before it.
+#[test]
+fn signature_wf_resolves_submodule_types() {
+    run_module_prog(
+        "signature S = sig \
+            module M : sig type t end \
+            val f : M.t -> int \
+         end \
+         val run = fun () -> 0",
+        0
+    );
+}
+
+#[test]
+fn signature_wf_rejects_unbound_type() {
+    assert_prog_type_error(
+        "signature S = sig val x : nosuch end \
+         val run = fun () -> 0",
+        "unbound type identifier"
+    );
+}
+
+#[test]
+fn signature_wf_rejects_forward_type_reference() {
+    assert_prog_type_error(
+        "signature S = sig val x : t type t end \
+         val run = fun () -> 0",
+        "unbound type identifier"
+    );
+}
+
+#[test]
+fn signature_wf_rejects_unbound_submodule_type() {
+    assert_prog_type_error(
+        "signature S = sig module M : sig type t end val f : M.nosuch -> int end \
+         val run = fun () -> 0",
+        "has no type component"
+    );
+}
+
+#[test]
+fn signature_name_resolves() {
+    run_module_prog(
+        "signature S = sig type t end \
+         signature T = S \
+         val run = fun () -> 0",
+        0
+    );
+}
+
+#[test]
+fn signature_wf_rejects_unbound_signature_name() {
+    assert_prog_type_error(
+        "signature S = NoSuch \
+         val run = fun () -> 0",
+        "unbound signature identifier"
+    );
+}
+
+#[test]
+fn sig_binding_inside_module() {
+    run_module_prog(
+        "module M = mod \
+            signature S = sig type t val f : t -> int end \
+            val x = 1 \
+         end \
+         val run = fun () -> M.x",
+        1
+    );
+}
+
+// A signature binding may name an earlier one, here as the signature of a declared
+// submodule.
+#[test]
+fn sig_binding_names_earlier_binding() {
+    run_module_prog(
+        "signature S = sig type t end \
+         signature T = sig module M : S val g : int end \
+         val run = fun () -> 0",
+        0
+    );
+}
+
+#[test]
+fn sig_binding_visible_in_nested_module() {
+    run_module_prog(
+        "signature S = sig type t end \
+         module M = mod \
+            signature T = S \
+            val x = 2 \
+         end \
+         val run = fun () -> M.x",
+        2
+    );
+}
+
+// `x` is declared as a value, so naming it in type position is not a type error caught by
+// stamping -- the name is bound -- but by the kind checker, which finds no type by that name.
+#[test]
+fn sig_binding_rejects_value_used_as_type() {
+    assert_prog_type_error(
+        "signature S = sig val x : int val f : x -> int end \
+         val run = fun () -> 0",
+        "unbound type identifier"
+    );
+}
+
+#[test]
+fn sig_binding_rejects_non_type_component() {
+    assert_prog_type_error(
+        "signature S = sig module M : sig val y : int end val f : M.y -> int end \
+         val run = fun () -> 0",
+        "is not a type"
+    );
+}
+
+#[test]
+fn sig_binding_rejects_forward_reference() {
+    assert_prog_type_error(
+        "signature S = T \
+         signature T = sig type t end \
+         val run = fun () -> 0",
+        "unbound signature identifier"
+    );
+}
+
+#[test]
+fn sig_binding_shadows_earlier_binding() {
+    run_module_prog(
+        "signature S = sig type t end \
+         signature S = sig type u val h : u -> int end \
+         signature T = sig module M : S end \
+         val run = fun () -> 0",
+        0
     );
 }
